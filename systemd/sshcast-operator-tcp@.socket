@@ -1,0 +1,11 @@
+[Unit]
+Description=Sshcast Operator Console Local TCP Socket on 127.0.0.1:%i
+Documentation=https://github.com/theraphim/sshcast-operator
+
+[Socket]
+ListenStream=127.0.0.1:%i
+Service=sshcast-operator.service
+Accept=no
+
+[Install]
+WantedBy=sockets.target

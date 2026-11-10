@@ -1,0 +1,12 @@
+[Unit]
+Description=Sshcast Operator Console Unix Socket (for Nginx proxy_pass)
+Documentation=https://github.com/theraphim/sshcast-operator
+
+[Socket]
+ListenStream=/run/sshcast/operator.sock
+RuntimeDirectory=sshcast
+SocketMode=0666
+Accept=no
+
+[Install]
+WantedBy=sockets.target

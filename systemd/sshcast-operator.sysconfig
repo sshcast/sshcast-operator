@@ -1,0 +1,8 @@
+# Sshcast Operator Environment Configuration (/etc/sysconfig/sshcast-operator)
+# Loaded by sshcast-operator.service via systemd EnvironmentFile.
+#
+# Generate a new operator keypair with:
+#   sshcast-operator --keygen
+# or initialize automatically with:
+#   sshcast-operator --init-sysconfig /etc/sysconfig/sshcast-operator
+SSHCAST_OPERATOR_KEY=""

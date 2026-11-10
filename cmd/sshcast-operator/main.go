@@ -1,0 +1,204 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"stingr.net/go/sshcast-operator/internal/config"
+	"stingr.net/go/sshcast-operator/internal/web"
+)
+
+const systemdListenFDsStart = 3
+
+// acquireSystemdListeners inspects LISTEN_FDS (and LISTEN_PID if set) and returns a net.Listener
+// for every socket file descriptor passed by systemd (starting at FD 3).
+// This allows sshcast-operator to simultaneously serve any combination of sshcast-operator.socket
+// (/run/sshcast/operator.sock) and sshcast-operator-tcp@<port>.socket (127.0.0.1:<port>).
+func acquireSystemdListeners() ([]net.Listener, error) {
+	nfdsStr := strings.TrimSpace(os.Getenv("LISTEN_FDS"))
+	if nfdsStr == "" {
+		return nil, nil
+	}
+	if pidStr := strings.TrimSpace(os.Getenv("LISTEN_PID")); pidStr != "" {
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil || pid != os.Getpid() {
+			return nil, nil
+		}
+	}
+	nfds, err := strconv.Atoi(nfdsStr)
+	if err != nil || nfds <= 0 {
+		return nil, fmt.Errorf("invalid LISTEN_FDS=%q", nfdsStr)
+	}
+
+	listeners := make([]net.Listener, 0, nfds)
+	for i := 0; i < nfds; i++ {
+		fd := systemdListenFDsStart + i
+		syscall.CloseOnExec(fd)
+		f := os.NewFile(uintptr(fd), fmt.Sprintf("systemd-listen-fd-%d", fd))
+		if f == nil {
+			for _, ln := range listeners {
+				_ = ln.Close()
+			}
+			return nil, fmt.Errorf("failed to wrap systemd file descriptor %d", fd)
+		}
+		ln, err := net.FileListener(f)
+		_ = f.Close()
+		if err != nil {
+			for _, prev := range listeners {
+				_ = prev.Close()
+			}
+			return nil, fmt.Errorf("net.FileListener on fd %d: %w", fd, err)
+		}
+		listeners = append(listeners, ln)
+	}
+	return listeners, nil
+}
+
+// acquireStandaloneListener opens a Unix domain socket (if addr starts with "unix:" or "/")
+// or a TCP listener when sshcast-operator is started outside systemd socket activation.
+func acquireStandaloneListener(addr string) (net.Listener, error) {
+	trimmed := strings.TrimSpace(addr)
+	if strings.HasPrefix(trimmed, "unix:") || strings.HasPrefix(trimmed, "/") {
+		sockPath := strings.TrimPrefix(trimmed, "unix:")
+		if err := os.MkdirAll(filepath.Dir(sockPath), 0755); err != nil {
+			return nil, fmt.Errorf("mkdir socket parent %q: %w", filepath.Dir(sockPath), err)
+		}
+		_ = os.Remove(sockPath)
+		ln, err := net.Listen("unix", sockPath)
+		if err != nil {
+			return nil, err
+		}
+		_ = os.Chmod(sockPath, 0666)
+		return ln, nil
+	}
+	return net.Listen("tcp", trimmed)
+}
+
+func main() {
+	var (
+		configPath    = flag.String("config", "", "Path to operator.toml configuration file (defaults to /etc/sshcast/operator.toml)")
+		sysconfigPath = flag.String("sysconfig", "", "Path to /etc/sysconfig/sshcast-operator when SSHCAST_OPERATOR_KEY is not in env")
+		listenAddr    = flag.String("listen", "", "Listen address override when not socket-activated (e.g. unix:/run/sshcast/operator.sock or 127.0.0.1:8090)")
+		basePath      = flag.String("base-path", "", "Base URL path override (default: /console)")
+		keygen        = flag.Bool("keygen", false, "Generate a new Ed25519 operator keypair and print sysconfig + server.toml snippets")
+		initSysconfig = flag.String("init-sysconfig", "", "Initialize /etc/sysconfig/sshcast-operator with a new operator key if not yet set")
+		printPubkey   = flag.Bool("print-pubkey", false, "Print the active Operator Public Key (sc_op_pub_...)")
+		hashPassword  = flag.String("hash-password", "", "Hash a plaintext password using bcrypt for operator.toml")
+	)
+	flag.Parse()
+
+	if *keygen {
+		privTok, pubTok, _, _, err := config.GenerateOperatorKeypair()
+		if err != nil {
+			log.Fatalf("Failed to generate operator keypair: %v", err)
+		}
+		fmt.Printf("# Put in /etc/sysconfig/sshcast-operator (chmod 0600):\n")
+		fmt.Printf("SSHCAST_OPERATOR_KEY=%q\n\n", privTok)
+		fmt.Printf("# Put in /etc/sshcast/server.toml on coordinator servers:\n")
+		fmt.Printf("trusted_operator_pubkeys = [\n  %q,\n]\n", pubTok)
+		return
+	}
+
+	if *initSysconfig != "" {
+		pubTok, created, err := config.InitSysconfigFile(*initSysconfig)
+		if err != nil {
+			log.Fatalf("Failed to initialize %s: %v", *initSysconfig, err)
+		}
+		if created {
+			fmt.Printf("Generated new operator key in %s (Public Key: %s)\n", *initSysconfig, pubTok)
+		} else {
+			fmt.Printf("Existing operator key retained in %s (Public Key: %s)\n", *initSysconfig, pubTok)
+		}
+		return
+	}
+
+	if *hashPassword != "" {
+		h, err := config.HashPassword(*hashPassword)
+		if err != nil {
+			log.Fatalf("Failed to hash password: %v", err)
+		}
+		fmt.Println(h)
+		return
+	}
+
+	if *printPubkey {
+		rawKey, err := config.ReadOperatorKeyFromEnvOrFile(*sysconfigPath)
+		if err != nil {
+			log.Fatalf("Failed to load operator key: %v", err)
+		}
+		_, pub, err := config.ParseOperatorPrivKey(rawKey)
+		if err != nil {
+			log.Fatalf("Invalid operator key: %v", err)
+		}
+		fmt.Printf("%s%x\n", config.OperatorPubPrefix, []byte(pub))
+		return
+	}
+
+	cfg, err := config.Load(*configPath, *sysconfigPath)
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+	if *listenAddr != "" {
+		cfg.ListenAddr = *listenAddr
+	}
+	if *basePath != "" {
+		cfg.BasePath = *basePath
+		cfg.Normalize()
+	}
+
+	log.Printf("[sshcast-operator] Operator Public Key: %s (base_path=%s, configured_users=%d)",
+		cfg.OperatorPubKeyToken(), cfg.BasePath, cfg.UserCount())
+
+	consoleSrv := web.NewConsoleServer(cfg)
+	httpServer := &http.Server{
+		Handler:           consoleSrv,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	listeners, err := acquireSystemdListeners()
+	if err != nil {
+		log.Fatalf("Failed to acquire systemd socket-activated listeners: %v", err)
+	}
+	if len(listeners) == 0 {
+		ln, err := acquireStandaloneListener(cfg.ListenAddr)
+		if err != nil {
+			log.Fatalf("Failed to listen on %s: %v", cfg.ListenAddr, err)
+		}
+		listeners = append(listeners, ln)
+	}
+
+	errCh := make(chan error, len(listeners))
+	for _, ln := range listeners {
+		ln := ln
+		go func() {
+			log.Printf("[sshcast-operator] Listening on %s://%s (serving %s/)", ln.Addr().Network(), ln.Addr().String(), cfg.BasePath)
+			errCh <- httpServer.Serve(ln)
+		}()
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case sig := <-sigCh:
+		log.Printf("[sshcast-operator] Received signal %v, shutting down...", sig)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = httpServer.Shutdown(ctx)
+	case err := <-errCh:
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatalf("[sshcast-operator] Server error: %v", err)
+		}
+	}
+}

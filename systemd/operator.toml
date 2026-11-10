@@ -1,0 +1,20 @@
+# Sshcast Operator Console Configuration (/etc/sshcast/operator.toml)
+
+# Fallback listen address when NOT using systemd socket activation (LISTEN_FDS).
+# Under systemd, enable sshcast-operator.socket (/run/sshcast/operator.sock for Nginx)
+# and/or sshcast-operator-tcp@<port>.socket (127.0.0.1:<port>).
+listen_addr = "unix:/run/sshcast/operator.sock"
+
+# Base URL path where the console is mounted behind Nginx
+base_path = "/console"
+
+# Default validity period in days for signed UserCert tokens (0 = never expires)
+default_expires_days = 365
+
+# Admin users allowed to sign in to /console/.
+# Generate a bcrypt password hash with:
+#   sshcast-operator --hash-password 'your-secret-password'
+#
+# [[users]]
+# username = "admin"
+# password_hash = "$2a$10$..."

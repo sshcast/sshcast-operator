@@ -1,0 +1,23 @@
+[Unit]
+Description=Sshcast Operator Console (User Key Signing & Swarm Authority)
+Documentation=https://github.com/theraphim/sshcast-operator
+After=network-online.target sshcast-operator.socket
+Wants=network-online.target sshcast-operator.socket
+
+[Service]
+Type=simple
+DynamicUser=yes
+EnvironmentFile=-/etc/sysconfig/sshcast-operator
+ConfigurationDirectory=sshcast::ro
+ConfigurationDirectoryMode=0755
+ExecStart=/usr/bin/sshcast-operator --config ${CONFIGURATION_DIRECTORY}/operator.toml
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
+Also=sshcast-operator.socket
