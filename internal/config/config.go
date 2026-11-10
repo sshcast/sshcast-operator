@@ -10,12 +10,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/alecthomas/kong"
 	"github.com/pelletier/go-toml/v2"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -33,11 +31,11 @@ type UserEntry struct {
 
 type Config struct {
 	SysconfigPath      string            `toml:"-" name:"sysconfig" default:"/etc/sysconfig/sshcast-operator" help:"Path to /etc/sysconfig/sshcast-operator when SSHCAST_OPERATOR_KEY is not in env." placeholder:"PATH"`
-	ListenAddr         string            `toml:"listen_addr" name:"listen" aliases:"listen-addr" default:"unix:/run/sshcast/operator.sock" help:"Listen address override when not socket-activated (e.g. unix:/run/sshcast/operator.sock or 127.0.0.1:8090)."`
-	BasePath           string            `toml:"base_path" name:"base-path" default:"/console" help:"Base URL path override (default: /console)."`
-	DefaultExpiresDays uint64            `toml:"default_expires_days" name:"default-expires-days" default:"365" help:"Default certificate validity period in days."`
+	ListenAddr         string            `toml:"listen_addr" name:"listen_addr" aliases:"listen,listen-addr" default:"unix:/run/sshcast/operator.sock" help:"Listen address override when not socket-activated (e.g. unix:/run/sshcast/operator.sock or 127.0.0.1:8090)."`
+	BasePath           string            `toml:"base_path" name:"base_path" aliases:"base-path" default:"/console" help:"Base URL path override (default: /console)."`
+	DefaultExpiresDays uint64            `toml:"default_expires_days" name:"default_expires_days" aliases:"default-expires-days" default:"365" help:"Default certificate validity period in days."`
 	Users              []UserEntry       `toml:"users" json:"users" name:"users" hidden:""`
-	UserPasswords      map[string]string `toml:"user_passwords" json:"user_passwords" name:"user-passwords" hidden:""`
+	UserPasswords      map[string]string `toml:"user_passwords" json:"user_passwords" name:"user_passwords" aliases:"user-passwords" hidden:""`
 
 	OperatorPrivKey ed25519.PrivateKey `toml:"-" kong:"-"`
 	OperatorPubKey  ed25519.PublicKey  `toml:"-" kong:"-"`
@@ -62,32 +60,6 @@ func DefaultPaths() []string {
 	}
 	paths = append(paths, "/etc/sshcast/operator.toml")
 	return paths
-}
-
-// TOML returns a Kong Resolver that loads configuration values from a TOML reader using go-toml/v2.
-func TOML(r io.Reader) (kong.Resolver, error) {
-	values := map[string]any{}
-	if err := toml.NewDecoder(r).Decode(&values); err != nil {
-		return nil, err
-	}
-	var f kong.ResolverFunc = func(context *kong.Context, parent *kong.Path, flag *kong.Flag) (any, error) {
-		if tomlKey := strings.Split(flag.Tag.Get("toml"), ",")[0]; tomlKey != "" && tomlKey != "-" {
-			if raw, ok := values[tomlKey]; ok {
-				return raw, nil
-			}
-		}
-		name := strings.ReplaceAll(flag.Name, "-", "_")
-		if raw, ok := values[name]; ok {
-			return raw, nil
-		}
-		for _, alias := range flag.Aliases {
-			if raw, ok := values[strings.ReplaceAll(alias, "-", "_")]; ok {
-				return raw, nil
-			}
-		}
-		return nil, nil
-	}
-	return f, nil
 }
 
 // AfterApply implements kong's post-apply hook to normalize paths and compile user credentials.

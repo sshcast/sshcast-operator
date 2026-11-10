@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/alecthomas/kong"
+	kongtoml "github.com/alecthomas/kong-toml"
 	"stingr.net/go/sshcast-operator/internal/config"
 )
 
@@ -34,7 +35,7 @@ bob = "` + pwHash + `"
 	}
 
 	var parsed cli
-	parser, err := kong.New(&parsed, kong.Configuration(config.TOML))
+	parser, err := kong.New(&parsed, kong.Configuration(kongtoml.Loader))
 	if err != nil {
 		t.Fatalf("kong.New: %v", err)
 	}

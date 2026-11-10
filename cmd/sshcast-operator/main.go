@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+	kongtoml "github.com/alecthomas/kong-toml"
 	"github.com/coreos/go-systemd/v22/activation"
 	"github.com/coreos/go-systemd/v22/daemon"
 	"stingr.net/go/sshcast-operator/internal/config"
@@ -54,7 +55,7 @@ func main() {
 	kong.Parse(&cliArgs,
 		kong.Name("sshcast-operator"),
 		kong.Description("Sshcast Operator Console (User Key Signing & Swarm Authority)"),
-		kong.Configuration(config.TOML, config.DefaultPaths()...),
+		kong.Configuration(kongtoml.Loader, config.DefaultPaths()...),
 	)
 
 	if cliArgs.Keygen {
