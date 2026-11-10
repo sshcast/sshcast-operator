@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	github.com/BurntSushi/toml v1.5.0
+	github.com/coreos/go-systemd/v22 v22.7.0
 	golang.org/x/crypto v0.58.0
 	stingr.net/go/sshcast-proto v0.1.3
 )

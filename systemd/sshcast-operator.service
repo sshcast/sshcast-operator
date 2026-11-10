@@ -5,7 +5,7 @@ After=network-online.target sshcast-operator.socket
 Wants=network-online.target sshcast-operator.socket
 
 [Service]
-Type=simple
+Type=notify
 DynamicUser=yes
 EnvironmentFile=-/etc/sysconfig/sshcast-operator
 ConfigurationDirectory=sshcast::ro
