@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -14,11 +13,21 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alecthomas/kong"
 	"github.com/coreos/go-systemd/v22/activation"
 	"github.com/coreos/go-systemd/v22/daemon"
 	"stingr.net/go/sshcast-operator/internal/config"
 	"stingr.net/go/sshcast-operator/internal/web"
 )
+
+type cli struct {
+	ConfigFile    kong.ConfigFlag `name:"config" help:"Path to operator.toml configuration file (defaults to /etc/sshcast/operator.toml)." placeholder:"PATH"`
+	Keygen        bool            `name:"keygen" help:"Generate a new Ed25519 operator keypair and print sysconfig + server.toml snippets."`
+	InitSysconfig string          `name:"init-sysconfig" help:"Initialize /etc/sysconfig/sshcast-operator with a new operator key if not yet set." placeholder:"PATH"`
+	PrintPubkey   bool            `name:"print-pubkey" help:"Print the active Operator Public Key (sc_op_pub_...)."`
+	HashPassword  string          `name:"hash-password" help:"Hash a plaintext password using bcrypt for operator.toml."`
+	config.Config `embed:""`
+}
 
 // acquireStandaloneListener opens a Unix domain socket (if addr starts with "unix:" or "/")
 // or a TCP listener when sshcast-operator is started outside systemd socket activation.
@@ -41,19 +50,14 @@ func acquireStandaloneListener(addr string) (net.Listener, error) {
 }
 
 func main() {
-	var (
-		configPath    = flag.String("config", "", "Path to operator.toml configuration file (defaults to /etc/sshcast/operator.toml)")
-		sysconfigPath = flag.String("sysconfig", "", "Path to /etc/sysconfig/sshcast-operator when SSHCAST_OPERATOR_KEY is not in env")
-		listenAddr    = flag.String("listen", "", "Listen address override when not socket-activated (e.g. unix:/run/sshcast/operator.sock or 127.0.0.1:8090)")
-		basePath      = flag.String("base-path", "", "Base URL path override (default: /console)")
-		keygen        = flag.Bool("keygen", false, "Generate a new Ed25519 operator keypair and print sysconfig + server.toml snippets")
-		initSysconfig = flag.String("init-sysconfig", "", "Initialize /etc/sysconfig/sshcast-operator with a new operator key if not yet set")
-		printPubkey   = flag.Bool("print-pubkey", false, "Print the active Operator Public Key (sc_op_pub_...)")
-		hashPassword  = flag.String("hash-password", "", "Hash a plaintext password using bcrypt for operator.toml")
+	var cliArgs cli
+	kong.Parse(&cliArgs,
+		kong.Name("sshcast-operator"),
+		kong.Description("Sshcast Operator Console (User Key Signing & Swarm Authority)"),
+		kong.Configuration(config.TOML, config.DefaultPaths()...),
 	)
-	flag.Parse()
 
-	if *keygen {
+	if cliArgs.Keygen {
 		privTok, pubTok, _, _, err := config.GenerateOperatorKeypair()
 		if err != nil {
 			log.Fatalf("Failed to generate operator keypair: %v", err)
@@ -65,21 +69,21 @@ func main() {
 		return
 	}
 
-	if *initSysconfig != "" {
-		pubTok, created, err := config.InitSysconfigFile(*initSysconfig)
+	if cliArgs.InitSysconfig != "" {
+		pubTok, created, err := config.InitSysconfigFile(cliArgs.InitSysconfig)
 		if err != nil {
-			log.Fatalf("Failed to initialize %s: %v", *initSysconfig, err)
+			log.Fatalf("Failed to initialize %s: %v", cliArgs.InitSysconfig, err)
 		}
 		if created {
-			fmt.Printf("Generated new operator key in %s (Public Key: %s)\n", *initSysconfig, pubTok)
+			fmt.Printf("Generated new operator key in %s (Public Key: %s)\n", cliArgs.InitSysconfig, pubTok)
 		} else {
-			fmt.Printf("Existing operator key retained in %s (Public Key: %s)\n", *initSysconfig, pubTok)
+			fmt.Printf("Existing operator key retained in %s (Public Key: %s)\n", cliArgs.InitSysconfig, pubTok)
 		}
 		return
 	}
 
-	if *hashPassword != "" {
-		h, err := config.HashPassword(*hashPassword)
+	if cliArgs.HashPassword != "" {
+		h, err := config.HashPassword(cliArgs.HashPassword)
 		if err != nil {
 			log.Fatalf("Failed to hash password: %v", err)
 		}
@@ -87,8 +91,8 @@ func main() {
 		return
 	}
 
-	if *printPubkey {
-		rawKey, err := config.ReadOperatorKeyFromEnvOrFile(*sysconfigPath)
+	if cliArgs.PrintPubkey {
+		rawKey, err := config.ReadOperatorKeyFromEnvOrFile(cliArgs.SysconfigPath)
 		if err != nil {
 			log.Fatalf("Failed to load operator key: %v", err)
 		}
@@ -100,16 +104,9 @@ func main() {
 		return
 	}
 
-	cfg, err := config.Load(*configPath, *sysconfigPath)
-	if err != nil {
+	cfg := &cliArgs.Config
+	if err := cfg.LoadOperatorKey(cfg.SysconfigPath); err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
-	}
-	if *listenAddr != "" {
-		cfg.ListenAddr = *listenAddr
-	}
-	if *basePath != "" {
-		cfg.BasePath = *basePath
-		cfg.Normalize()
 	}
 
 	log.Printf("[sshcast-operator] Operator Public Key: %s (base_path=%s, configured_users=%d)",

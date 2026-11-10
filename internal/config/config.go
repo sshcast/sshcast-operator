@@ -10,11 +10,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/BurntSushi/toml"
+	"github.com/alecthomas/kong"
+	"github.com/pelletier/go-toml/v2"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -25,24 +27,26 @@ const (
 )
 
 type UserEntry struct {
-	Username     string `toml:"username"`
-	PasswordHash string `toml:"password_hash"`
+	Username     string `toml:"username" json:"username"`
+	PasswordHash string `toml:"password_hash" json:"password_hash"`
 }
 
 type Config struct {
-	ListenAddr         string            `toml:"listen_addr"`
-	BasePath           string            `toml:"base_path"`
-	DefaultExpiresDays uint64            `toml:"default_expires_days"`
-	Users              []UserEntry       `toml:"users"`
-	UserPasswords      map[string]string `toml:"user_passwords"`
+	SysconfigPath      string            `toml:"-" name:"sysconfig" default:"/etc/sysconfig/sshcast-operator" help:"Path to /etc/sysconfig/sshcast-operator when SSHCAST_OPERATOR_KEY is not in env." placeholder:"PATH"`
+	ListenAddr         string            `toml:"listen_addr" name:"listen" aliases:"listen-addr" default:"unix:/run/sshcast/operator.sock" help:"Listen address override when not socket-activated (e.g. unix:/run/sshcast/operator.sock or 127.0.0.1:8090)."`
+	BasePath           string            `toml:"base_path" name:"base-path" default:"/console" help:"Base URL path override (default: /console)."`
+	DefaultExpiresDays uint64            `toml:"default_expires_days" name:"default-expires-days" default:"365" help:"Default certificate validity period in days."`
+	Users              []UserEntry       `toml:"users" json:"users" name:"users" hidden:""`
+	UserPasswords      map[string]string `toml:"user_passwords" json:"user_passwords" name:"user-passwords" hidden:""`
 
-	OperatorPrivKey ed25519.PrivateKey `toml:"-"`
-	OperatorPubKey  ed25519.PublicKey  `toml:"-"`
-	compiledUsers   map[string]string
+	OperatorPrivKey ed25519.PrivateKey `toml:"-" kong:"-"`
+	OperatorPubKey  ed25519.PublicKey  `toml:"-" kong:"-"`
+	compiledUsers   map[string]string  `toml:"-" kong:"-"`
 }
 
 func Default() *Config {
 	return &Config{
+		SysconfigPath:      DefaultSysconfig,
 		ListenAddr:         "unix:/run/sshcast/operator.sock",
 		BasePath:           "/console",
 		DefaultExpiresDays: 365,
@@ -50,18 +54,58 @@ func Default() *Config {
 	}
 }
 
-func Load(path string, sysconfigPath string) (*Config, error) {
-	cfg := Default()
-	if path == "" {
-		if confDir := strings.TrimSpace(os.Getenv("CONFIGURATION_DIRECTORY")); confDir != "" {
-			candidate := filepath.Join(strings.Split(confDir, ":")[0], "operator.toml")
-			if _, err := os.Stat(candidate); err == nil {
-				path = candidate
+// DefaultPaths returns default operator.toml search paths (such as $CONFIGURATION_DIRECTORY/operator.toml).
+func DefaultPaths() []string {
+	var paths []string
+	if confDir := strings.TrimSpace(os.Getenv("CONFIGURATION_DIRECTORY")); confDir != "" {
+		paths = append(paths, filepath.Join(strings.Split(confDir, ":")[0], "operator.toml"))
+	}
+	paths = append(paths, "/etc/sshcast/operator.toml")
+	return paths
+}
+
+// TOML returns a Kong Resolver that loads configuration values from a TOML reader using go-toml/v2.
+func TOML(r io.Reader) (kong.Resolver, error) {
+	values := map[string]any{}
+	if err := toml.NewDecoder(r).Decode(&values); err != nil {
+		return nil, err
+	}
+	var f kong.ResolverFunc = func(context *kong.Context, parent *kong.Path, flag *kong.Flag) (any, error) {
+		if tomlKey := strings.Split(flag.Tag.Get("toml"), ",")[0]; tomlKey != "" && tomlKey != "-" {
+			if raw, ok := values[tomlKey]; ok {
+				return raw, nil
 			}
 		}
-		if path == "" {
-			if _, err := os.Stat("/etc/sshcast/operator.toml"); err == nil {
-				path = "/etc/sshcast/operator.toml"
+		name := strings.ReplaceAll(flag.Name, "-", "_")
+		if raw, ok := values[name]; ok {
+			return raw, nil
+		}
+		for _, alias := range flag.Aliases {
+			if raw, ok := values[strings.ReplaceAll(alias, "-", "_")]; ok {
+				return raw, nil
+			}
+		}
+		return nil, nil
+	}
+	return f, nil
+}
+
+// AfterApply implements kong's post-apply hook to normalize paths and compile user credentials.
+func (c *Config) AfterApply() error {
+	c.Normalize()
+	return nil
+}
+
+func Load(path string, sysconfigPath string) (*Config, error) {
+	cfg := Default()
+	if sysconfigPath != "" {
+		cfg.SysconfigPath = sysconfigPath
+	}
+	if path == "" {
+		for _, candidate := range DefaultPaths() {
+			if _, err := os.Stat(candidate); err == nil {
+				path = candidate
+				break
 			}
 		}
 	}
@@ -70,13 +114,13 @@ func Load(path string, sysconfigPath string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read config %q: %w", path, err)
 		}
-		if _, err := toml.Decode(string(data), cfg); err != nil {
+		if err := toml.Unmarshal(data, cfg); err != nil {
 			return nil, fmt.Errorf("parse config %q: %w", path, err)
 		}
 	}
 	cfg.Normalize()
 
-	if err := cfg.LoadOperatorKey(sysconfigPath); err != nil {
+	if err := cfg.LoadOperatorKey(cfg.SysconfigPath); err != nil {
 		return nil, err
 	}
 	return cfg, nil
