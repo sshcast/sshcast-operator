@@ -37,9 +37,6 @@ install -D -m 0644 systemd/operator.toml %{buildroot}%{_sysconfdir}/sshcast/oper
 install -D -m 0600 systemd/sshcast-operator.sysconfig %{buildroot}%{_sysconfdir}/sysconfig/sshcast-operator
 
 %post
-chmod 0755 %{_sysconfdir}/sshcast 2>/dev/null || :
-chmod 0644 %{_sysconfdir}/sshcast/operator.toml 2>/dev/null || :
-chmod 0600 %{_sysconfdir}/sysconfig/sshcast-operator 2>/dev/null || :
 %{_bindir}/sshcast-operator --init-sysconfig %{_sysconfdir}/sysconfig/sshcast-operator >/dev/null 2>&1 || :
 %systemd_post sshcast-operator.socket sshcast-operator.service
 
