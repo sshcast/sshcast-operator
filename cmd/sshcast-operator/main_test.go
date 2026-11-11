@@ -19,7 +19,7 @@ func TestKongTOMLAndCLIFlagOverrides(t *testing.T) {
 	}
 
 	tomlContent := `
-listen_addr = "unix:/run/sshcast/operator.sock"
+listen_addr = "unix:/run/sshcast-operator/operator.sock"
 base_path = "/ops"
 default_expires_days = 180
 

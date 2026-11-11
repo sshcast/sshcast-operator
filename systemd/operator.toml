@@ -1,9 +1,9 @@
 # Sshcast Operator Console Configuration (/etc/sshcast/operator.toml)
 
 # Fallback listen address when NOT using systemd socket activation (LISTEN_FDS).
-# Under systemd, enable sshcast-operator.socket (/run/sshcast/operator.sock for Nginx)
+# Under systemd, enable sshcast-operator.socket (/run/sshcast-operator/operator.sock for Nginx)
 # and/or sshcast-operator-tcp@<port>.socket (127.0.0.1:<port>).
-listen_addr = "unix:/run/sshcast/operator.sock"
+listen_addr = "unix:/run/sshcast-operator/operator.sock"
 
 # Base URL path where the console is mounted behind Nginx
 base_path = "/console"

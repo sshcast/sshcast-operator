@@ -31,7 +31,7 @@ type UserEntry struct {
 
 type Config struct {
 	SysconfigPath      string            `toml:"-" name:"sysconfig" default:"/etc/sysconfig/sshcast-operator" help:"Path to /etc/sysconfig/sshcast-operator when SSHCAST_OPERATOR_KEY is not in env." placeholder:"PATH"`
-	ListenAddr         string            `toml:"listen_addr" name:"listen_addr" aliases:"listen,listen-addr" default:"unix:/run/sshcast/operator.sock" help:"Listen address override when not socket-activated (e.g. unix:/run/sshcast/operator.sock or 127.0.0.1:8090)."`
+	ListenAddr         string            `toml:"listen_addr" name:"listen_addr" aliases:"listen,listen-addr" default:"unix:/run/sshcast-operator/operator.sock" help:"Listen address override when not socket-activated (e.g. unix:/run/sshcast-operator/operator.sock or 127.0.0.1:8090)."`
 	BasePath           string            `toml:"base_path" name:"base_path" aliases:"base-path" default:"/console" help:"Base URL path override (default: /console)."`
 	DefaultExpiresDays uint64            `toml:"default_expires_days" name:"default_expires_days" aliases:"default-expires-days" default:"365" help:"Default certificate validity period in days."`
 	Users              []UserEntry       `toml:"users" json:"users" name:"users" hidden:""`
@@ -45,7 +45,7 @@ type Config struct {
 func Default() *Config {
 	return &Config{
 		SysconfigPath:      DefaultSysconfig,
-		ListenAddr:         "unix:/run/sshcast/operator.sock",
+		ListenAddr:         "unix:/run/sshcast-operator/operator.sock",
 		BasePath:           "/console",
 		DefaultExpiresDays: 365,
 		compiledUsers:      make(map[string]string),

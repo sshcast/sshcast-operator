@@ -36,7 +36,7 @@ func TestConsoleLoginAndKeySigningFlow(t *testing.T) {
 
 	cfgPath := filepath.Join(tmp, "operator.toml")
 	tomlData := `
-listen_addr = "unix:/run/sshcast/operator.sock"
+listen_addr = "unix:/run/sshcast-operator/operator.sock"
 base_path = "/console"
 default_expires_days = 365
 

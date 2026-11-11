@@ -8,7 +8,7 @@ Operator Console & User Key Signing Authority for autonomous Sshcast coordinator
 
 1. **Operator Key (`SSHCAST_OPERATOR_KEY`)**: Stored in `/etc/sysconfig/sshcast-operator` (`sc_op_priv_<64-hex>`).
 2. **Coordinator Trust (`trusted_operator_pubkeys`)**: Each `sshcast-server` node configures `trusted_operator_pubkeys = ["sc_op_pub_<64-hex>"]` in `/etc/sshcast/server.toml`.
-3. **Web Console (`/console/`)**: Served behind Nginx via systemd socket activation (`/run/sshcast/operator.sock`), authenticated against user/password hashes in `/etc/sshcast/operator.toml`.
+3. **Web Console (`/console/`)**: Served behind Nginx via systemd socket activation (`/run/sshcast-operator/operator.sock`), authenticated against user/password hashes in `/etc/sshcast/operator.toml`.
 4. **Signing a User Key**: Paste a user's `sc_pub_...` key into `/console/` to mint an `sc_cert_<base64>` certificate token. The user imports it once with:
    ```bash
    sshcast-client import-cert --cert sc_cert_...
@@ -43,7 +43,7 @@ Operator Console & User Key Signing Authority for autonomous Sshcast coordinator
 4. **Nginx Configuration (`/console/`)**:
    ```nginx
    location /console/ {
-       proxy_pass http://unix:/run/sshcast/operator.sock;
+       proxy_pass http://unix:/run/sshcast-operator/operator.sock;
        proxy_set_header Host $host;
        proxy_set_header X-Real-IP $remote_addr;
        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
