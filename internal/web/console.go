@@ -29,6 +29,7 @@ type ConsoleServer struct {
 	cookieKey  []byte
 	loginTmpl  *template.Template
 	portalTmpl *template.Template
+	mux        *http.ServeMux
 }
 
 type SignedCertResult struct {
@@ -65,51 +66,40 @@ func NewConsoleServer(cfg *config.Config) *ConsoleServer {
 	mac.Write(cfg.OperatorPrivKey)
 	cookieKey := mac.Sum(nil)
 
-	return &ConsoleServer{
+	s := &ConsoleServer{
 		cfg:        cfg,
 		cookieKey:  cookieKey,
 		loginTmpl:  template.Must(template.New("login").Parse(loginHTML)),
 		portalTmpl: template.Must(template.New("portal").Parse(portalHTML)),
+		mux:        http.NewServeMux(),
 	}
+
+	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("GET "+cfg.BasePath+"/healthz", s.handleHealthz)
+
+	// Support both Nginx passing /console/... intact OR Nginx stripping /console prefix.
+	for _, prefix := range []string{"", cfg.BasePath} {
+		s.mux.HandleFunc("GET "+prefix+"/{$}", s.handlePortal)
+		s.mux.HandleFunc("GET "+prefix+"/login", s.handleLoginGet)
+		s.mux.HandleFunc("POST "+prefix+"/login", s.handleLoginPost)
+		s.mux.HandleFunc("POST "+prefix+"/logout", s.handleLogout)
+		s.mux.HandleFunc("GET "+prefix+"/sign", s.handleSignGet)
+		s.mux.HandleFunc("POST "+prefix+"/sign", s.handleSignForm)
+		s.mux.HandleFunc("POST "+prefix+"/api/sign", s.handleSignAPI)
+	}
+
+	return s
 }
 
 func (s *ConsoleServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
+	s.mux.ServeHTTP(w, r)
+}
 
-	path := r.URL.Path
-	if path == "/healthz" || path == s.cfg.BasePath+"/healthz" {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprintln(w, "ok")
-		return
-	}
-
-	if path == "/" || path == s.cfg.BasePath {
-		http.Redirect(w, r, s.cfg.BasePath+"/", http.StatusFound)
-		return
-	}
-
-	// Support both Nginx passing /console/... intact OR Nginx stripping /console prefix.
-	rel := path
-	if strings.HasPrefix(rel, s.cfg.BasePath+"/") {
-		rel = strings.TrimPrefix(rel, s.cfg.BasePath)
-	}
-
-	switch rel {
-	case "/login":
-		s.handleLogin(w, r)
-	case "/logout":
-		s.handleLogout(w, r)
-	case "/":
-		s.handlePortal(w, r)
-	case "/sign":
-		s.handleSignForm(w, r)
-	case "/api/sign":
-		s.handleSignAPI(w, r)
-	default:
-		http.NotFound(w, r)
-	}
+func (s *ConsoleServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = fmt.Fprintln(w, "ok")
 }
 
 func (s *ConsoleServer) createSessionToken(username string, expiresAt time.Time) string {
@@ -155,23 +145,19 @@ func (s *ConsoleServer) verifySessionRequest(r *http.Request) (string, bool) {
 	return user, true
 }
 
-func (s *ConsoleServer) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		if _, ok := s.verifySessionRequest(r); ok {
-			http.Redirect(w, r, s.cfg.BasePath+"/", http.StatusFound)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = s.loginTmpl.Execute(w, loginPageData{
-			BasePath: s.cfg.BasePath,
-			NoUsers:  s.cfg.UserCount() == 0,
-		})
+func (s *ConsoleServer) handleLoginGet(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.verifySessionRequest(r); ok {
+		http.Redirect(w, r, s.cfg.BasePath+"/", http.StatusFound)
 		return
 	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = s.loginTmpl.Execute(w, loginPageData{
+		BasePath: s.cfg.BasePath,
+		NoUsers:  s.cfg.UserCount() == 0,
+	})
+}
+
+func (s *ConsoleServer) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form data", http.StatusBadRequest)
 		return
@@ -215,10 +201,6 @@ func (s *ConsoleServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ConsoleServer) handlePortal(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	user, ok := s.verifySessionRequest(r)
 	if !ok {
 		http.Redirect(w, r, s.cfg.BasePath+"/login", http.StatusFound)
@@ -283,11 +265,11 @@ func (s *ConsoleServer) signKeyInternal(rawUserPub, rawUserID, rawExpiresDays st
 	}, nil
 }
 
+func (s *ConsoleServer) handleSignGet(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, s.cfg.BasePath+"/", http.StatusFound)
+}
+
 func (s *ConsoleServer) handleSignForm(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Redirect(w, r, s.cfg.BasePath+"/", http.StatusFound)
-		return
-	}
 	user, ok := s.verifySessionRequest(r)
 	if !ok {
 		http.Redirect(w, r, s.cfg.BasePath+"/login", http.StatusFound)
@@ -321,10 +303,6 @@ func (s *ConsoleServer) handleSignForm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ConsoleServer) handleSignAPI(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	if _, ok := s.verifySessionRequest(r); !ok {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)
