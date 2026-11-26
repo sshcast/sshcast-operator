@@ -1,0 +1,80 @@
+name: "sshcast-operator"
+arch: "${NFPM_ARCH}"
+platform: "linux"
+version: "${NFPM_VERSION}"
+release: "1"
+section: "net"
+priority: "optional"
+maintainer: "Paul Komkoff <i@stingr.net>"
+description: |
+  Operator Console & User Key Signing Authority for Sshcast Swarm
+  Sshcast Operator Console (sshcast-operator) provides web-based user key
+  signing (/console/) for autonomous Sshcast coordinator server swarms.
+  Coordinator servers only need the operator's Ed25519 public key
+  (trusted_operator_pubkeys) in /etc/sshcast/server.toml and continue operating
+  autonomously without any database dependency.
+homepage: "https://github.com/sshcast/sshcast-operator"
+license: "MIT OR Apache-2.0"
+
+depends:
+  - systemd
+
+contents:
+  - src: sshcast-operator
+    dst: /usr/bin/sshcast-operator
+    file_info:
+      mode: 0755
+
+  - src: systemd/sshcast-operator.service
+    dst: /usr/lib/systemd/system/sshcast-operator.service
+    file_info:
+      mode: 0644
+
+  - src: systemd/sshcast-operator.socket
+    dst: /usr/lib/systemd/system/sshcast-operator.socket
+    file_info:
+      mode: 0644
+
+  - src: systemd/sshcast-operator-tcp@.socket
+    dst: /usr/lib/systemd/system/sshcast-operator-tcp@.socket
+    file_info:
+      mode: 0644
+
+  - dst: /etc/sshcast
+    type: dir
+    file_info:
+      mode: 0755
+
+  - src: systemd/operator.toml
+    dst: /etc/sshcast/operator.toml
+    type: "config|noreplace"
+    file_info:
+      mode: 0644
+
+  - src: systemd/sshcast-operator.sysconfig
+    dst: /etc/sysconfig/sshcast-operator
+    type: "config|noreplace"
+    file_info:
+      mode: 0600
+
+  - src: LICENSE-MIT
+    dst: /usr/share/licenses/sshcast-operator/LICENSE-MIT
+    type: license
+    file_info:
+      mode: 0644
+
+  - src: LICENSE-APACHE
+    dst: /usr/share/licenses/sshcast-operator/LICENSE-APACHE
+    type: license
+    file_info:
+      mode: 0644
+
+  - src: README.md
+    dst: /usr/share/doc/sshcast-operator/README.md
+    type: doc
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: ./packaging/postinstall.sh
+  preremove: ./packaging/preremove.sh

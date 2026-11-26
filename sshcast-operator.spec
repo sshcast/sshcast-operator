@@ -24,10 +24,22 @@ autonomously without any database dependency.
 %autosetup -n %{name}-%{version}
 
 %build
-CGO_ENABLED=1 go build -mod=readonly -trimpath -ldflags="-s -w" -o sshcast-operator ./cmd/sshcast-operator
+export GOWORK=off
+export CGO_ENABLED=1
+GO_MOD_MODE="-mod=readonly"
+if [ -d vendor ]; then
+    GO_MOD_MODE="-mod=vendor"
+fi
+go build ${GO_MOD_MODE} -trimpath -ldflags="-s -w" -o sshcast-operator ./cmd/sshcast-operator
 
 %check
-CGO_ENABLED=1 go test -mod=readonly ./...
+export GOWORK=off
+export CGO_ENABLED=1
+GO_MOD_MODE="-mod=readonly"
+if [ -d vendor ]; then
+    GO_MOD_MODE="-mod=vendor"
+fi
+go test ${GO_MOD_MODE} ./...
 
 %install
 install -D -m 0755 sshcast-operator %{buildroot}%{_bindir}/sshcast-operator
