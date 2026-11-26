@@ -10,7 +10,7 @@ require (
 	github.com/pelletier/go-toml/v2 v2.4.3
 	golang.org/x/crypto v0.58.0
 	google.golang.org/protobuf v1.36.12
-	stingr.net/go/sshcast-proto v0.1.3
+	stingr.net/go/sshcast-proto v0.1.4
 )
 
 require (
