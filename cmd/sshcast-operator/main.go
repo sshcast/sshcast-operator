@@ -18,6 +18,7 @@ import (
 	"github.com/coreos/go-systemd/v22/activation"
 	"github.com/coreos/go-systemd/v22/daemon"
 	"stingr.net/go/sshcast-operator/internal/config"
+	"stingr.net/go/sshcast-operator/internal/db"
 	"stingr.net/go/sshcast-operator/internal/web"
 )
 
@@ -110,10 +111,18 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	log.Printf("[sshcast-operator] Operator Public Key: %s (base_path=%s, configured_users=%d)",
-		cfg.OperatorPubKeyToken(), cfg.BasePath, cfg.UserCount())
+	log.Printf("[sshcast-operator] Operator Public Key: %s (base_path=%s, configured_users=%d, db_path=%s)",
+		cfg.OperatorPubKeyToken(), cfg.BasePath, cfg.UserCount(), cfg.DBPath)
 
-	consoleSrv := web.NewConsoleServer(cfg)
+	sqlDB, queries, err := db.Open(cfg.DBPath)
+	if err != nil {
+		log.Fatalf("Failed to open SQLite database %s: %v", cfg.DBPath, err)
+	}
+	defer func() {
+		_ = sqlDB.Close()
+	}()
+
+	consoleSrv := web.NewConsoleServer(cfg, queries)
 	httpServer := &http.Server{
 		Handler:           consoleSrv,
 		ReadHeaderTimeout: 10 * time.Second,

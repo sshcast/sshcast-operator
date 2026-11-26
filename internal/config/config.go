@@ -30,25 +30,42 @@ type UserEntry struct {
 }
 
 type Config struct {
-	SysconfigPath      string            `toml:"-" name:"sysconfig" default:"/etc/sysconfig/sshcast-operator" help:"Path to /etc/sysconfig/sshcast-operator when SSHCAST_OPERATOR_KEY is not in env." placeholder:"PATH"`
-	ListenAddr         string            `toml:"listen_addr" name:"listen_addr" aliases:"listen,listen-addr" default:"unix:/run/sshcast-operator/operator.sock" help:"Listen address override when not socket-activated (e.g. unix:/run/sshcast-operator/operator.sock or 127.0.0.1:8090)."`
-	BasePath           string            `toml:"base_path" name:"base_path" aliases:"base-path" default:"/console" help:"Base URL path override (default: /console)."`
-	DefaultExpiresDays uint64            `toml:"default_expires_days" name:"default_expires_days" aliases:"default-expires-days" default:"365" help:"Default certificate validity period in days."`
-	Users              []UserEntry       `toml:"users" json:"users" name:"users" hidden:""`
-	UserPasswords      map[string]string `toml:"user_passwords" json:"user_passwords" name:"user_passwords" aliases:"user-passwords" hidden:""`
+	SysconfigPath          string            `toml:"-" name:"sysconfig" default:"/etc/sysconfig/sshcast-operator" help:"Path to /etc/sysconfig/sshcast-operator when SSHCAST_OPERATOR_KEY is not in env." placeholder:"PATH"`
+	ListenAddr             string            `toml:"listen_addr" name:"listen_addr" aliases:"listen,listen-addr" default:"unix:/run/sshcast-operator/operator.sock" help:"Listen address override when not socket-activated (e.g. unix:/run/sshcast-operator/operator.sock or 127.0.0.1:8090)."`
+	BasePath               string            `toml:"base_path" name:"base_path" aliases:"base-path" default:"/console" help:"Base URL path override (default: /console)."`
+	DefaultExpiresDays     uint64            `toml:"default_expires_days" name:"default_expires_days" aliases:"default-expires-days" default:"7" help:"Default certificate validity period in days."`
+	DBPath                 string            `toml:"db_path" name:"db_path" aliases:"db-path" help:"Path to SQLite state database (defaults to $STATE_DIRECTORY/operator.db or /var/lib/sshcast-operator/operator.db)."`
+	PublicURL              string            `toml:"public_url" name:"public_url" aliases:"public-url" help:"External base URL for GitHub OAuth callbacks (e.g. https://sshcast.example.com)."`
+	AutoApprove            bool              `toml:"auto_approve" name:"auto_approve" aliases:"auto-approve" negatable:"" default:"true" help:"Automatically approve new GitHub users meeting minimum account age."`
+	MinGitHubAccountAgeDays uint64           `toml:"min_github_account_age_days" name:"min_github_account_age_days" aliases:"min-github-account-age-days" default:"30" help:"Minimum GitHub account age in days for automatic approval."`
+	GitHubClientID         string            `toml:"github_client_id" name:"github_client_id" aliases:"github-client-id" env:"SSHCAST_GITHUB_CLIENT_ID" help:"GitHub OAuth App Client ID (or SSHCAST_GITHUB_CLIENT_ID)."`
+	GitHubClientSecret     string            `toml:"github_client_secret" name:"github_client_secret" aliases:"github-client-secret" env:"SSHCAST_GITHUB_CLIENT_SECRET" help:"GitHub OAuth App Client Secret (or SSHCAST_GITHUB_CLIENT_SECRET)."`
+	Users                  []UserEntry       `toml:"users" json:"users" name:"users" hidden:""`
+	UserPasswords          map[string]string `toml:"user_passwords" json:"user_passwords" name:"user_passwords" aliases:"user-passwords" hidden:""`
 
 	OperatorPrivKey ed25519.PrivateKey `toml:"-" kong:"-"`
 	OperatorPubKey  ed25519.PublicKey  `toml:"-" kong:"-"`
 	compiledUsers   map[string]string  `toml:"-" kong:"-"`
 }
 
+// DefaultDBPath returns the default SQLite path, respecting systemd's STATE_DIRECTORY.
+func DefaultDBPath() string {
+	if stateDir := strings.TrimSpace(os.Getenv("STATE_DIRECTORY")); stateDir != "" {
+		return filepath.Join(strings.Split(stateDir, ":")[0], "operator.db")
+	}
+	return "/var/lib/sshcast-operator/operator.db"
+}
+
 func Default() *Config {
 	return &Config{
-		SysconfigPath:      DefaultSysconfig,
-		ListenAddr:         "unix:/run/sshcast-operator/operator.sock",
-		BasePath:           "/console",
-		DefaultExpiresDays: 365,
-		compiledUsers:      make(map[string]string),
+		SysconfigPath:           DefaultSysconfig,
+		ListenAddr:              "unix:/run/sshcast-operator/operator.sock",
+		BasePath:                "/console",
+		DefaultExpiresDays:      7,
+		DBPath:                  DefaultDBPath(),
+		AutoApprove:             true,
+		MinGitHubAccountAgeDays: 30,
+		compiledUsers:           make(map[string]string),
 	}
 }
 
@@ -107,6 +124,20 @@ func (c *Config) Normalize() {
 			bp = "/" + bp
 		}
 		c.BasePath = strings.TrimRight(bp, "/")
+	}
+
+	c.DBPath = strings.TrimSpace(c.DBPath)
+	if c.DBPath == "" {
+		c.DBPath = DefaultDBPath()
+	}
+	c.PublicURL = strings.TrimRight(strings.TrimSpace(c.PublicURL), "/")
+	c.GitHubClientID = strings.TrimSpace(c.GitHubClientID)
+	if c.GitHubClientID == "" {
+		c.GitHubClientID = strings.TrimSpace(os.Getenv("SSHCAST_GITHUB_CLIENT_ID"))
+	}
+	c.GitHubClientSecret = strings.TrimSpace(c.GitHubClientSecret)
+	if c.GitHubClientSecret == "" {
+		c.GitHubClientSecret = strings.TrimSpace(os.Getenv("SSHCAST_GITHUB_CLIENT_SECRET"))
 	}
 
 	c.compiledUsers = make(map[string]string)

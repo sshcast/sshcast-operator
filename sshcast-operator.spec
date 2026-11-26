@@ -9,6 +9,7 @@ URL:            https://github.com/sshcast/sshcast-operator
 Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  golang
+BuildRequires:  gcc
 BuildRequires:  systemd-rpm-macros
 Requires:       systemd
 
@@ -23,10 +24,10 @@ autonomously without any database dependency.
 %autosetup -n %{name}-%{version}
 
 %build
-go build -mod=readonly -trimpath -ldflags="-s -w" -o sshcast-operator ./cmd/sshcast-operator
+CGO_ENABLED=1 go build -mod=readonly -trimpath -ldflags="-s -w" -o sshcast-operator ./cmd/sshcast-operator
 
 %check
-go test -mod=readonly ./...
+CGO_ENABLED=1 go test -mod=readonly ./...
 
 %install
 install -D -m 0755 sshcast-operator %{buildroot}%{_bindir}/sshcast-operator

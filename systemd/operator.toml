@@ -9,7 +9,21 @@ listen_addr = "unix:/run/sshcast-operator/operator.sock"
 base_path = "/console"
 
 # Default validity period in days for signed UserCert tokens (0 = never expires)
-default_expires_days = 365
+default_expires_days = 7
+
+# SQLite state database path (defaults to $STATE_DIRECTORY/operator.db or /var/lib/sshcast-operator/operator.db)
+# db_path = "/var/lib/sshcast-operator/operator.db"
+
+# External base URL for GitHub OAuth callbacks (e.g. "https://sshcast.example.com")
+# public_url = "https://sshcast.example.com"
+
+# GitHub OAuth enrollment policy
+auto_approve = true
+min_github_account_age_days = 30
+
+# GitHub OAuth App credentials (or set SSHCAST_GITHUB_CLIENT_ID / SSHCAST_GITHUB_CLIENT_SECRET in /etc/sysconfig/sshcast-operator)
+# github_client_id = ""
+# github_client_secret = ""
 
 # Admin users allowed to sign in to /console/.
 # Generate a bcrypt password hash with:
