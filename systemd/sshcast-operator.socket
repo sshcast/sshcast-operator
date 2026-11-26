@@ -1,6 +1,6 @@
 [Unit]
 Description=Sshcast Operator Console Unix Socket (for Nginx proxy_pass)
-Documentation=https://github.com/theraphim/sshcast-operator
+Documentation=https://github.com/sshcast/sshcast-operator
 
 [Socket]
 ListenStream=/run/sshcast-operator/operator.sock

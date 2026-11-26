@@ -1,6 +1,6 @@
 [Unit]
 Description=Sshcast Operator Console Local TCP Socket on 127.0.0.1:%i
-Documentation=https://github.com/theraphim/sshcast-operator
+Documentation=https://github.com/sshcast/sshcast-operator
 
 [Socket]
 ListenStream=127.0.0.1:%i

@@ -5,7 +5,7 @@ Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Operator Console & User Key Signing Authority for Sshcast Swarm
 License:        MIT OR Apache-2.0
-URL:            https://github.com/theraphim/sshcast-operator
+URL:            https://github.com/sshcast/sshcast-operator
 Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  golang
@@ -47,6 +47,7 @@ install -D -m 0600 systemd/sshcast-operator.sysconfig %{buildroot}%{_sysconfdir}
 %systemd_postun_with_restart sshcast-operator.socket sshcast-operator.service
 
 %files
+%license LICENSE-MIT LICENSE-APACHE
 %doc README.md
 %{_bindir}/sshcast-operator
 %{_unitdir}/sshcast-operator.service
