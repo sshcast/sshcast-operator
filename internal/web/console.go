@@ -20,7 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/protobuf/proto"
 	"stingr.net/go/sshcast-operator/internal/config"
 	"stingr.net/go/sshcast-operator/internal/db"
 	sshcastv1 "stingr.net/go/sshcast-proto/gen/go/sshcast/v1"
@@ -140,6 +139,12 @@ func NewConsoleServer(cfg *config.Config, queries *db.Queries) *ConsoleServer {
 
 		s.mux.HandleFunc("POST "+prefix+"/api/v1/renew", s.handleRenew)
 		s.mux.HandleFunc("OPTIONS "+prefix+"/api/v1/renew", s.handleRenewOptions)
+		s.mux.HandleFunc("POST "+prefix+"/api/v1/recovery-vault", s.handleRecoveryVaultUpsert)
+		s.mux.HandleFunc("OPTIONS "+prefix+"/api/v1/recovery-vault", s.handleRenewOptions)
+		s.mux.HandleFunc("POST "+prefix+"/api/v1/recovery-vault/status", s.handleRecoveryVaultStatus)
+		s.mux.HandleFunc("OPTIONS "+prefix+"/api/v1/recovery-vault/status", s.handleRenewOptions)
+		s.mux.HandleFunc("POST "+prefix+"/api/v1/recovery-vault/delete", s.handleRecoveryVaultDelete)
+		s.mux.HandleFunc("OPTIONS "+prefix+"/api/v1/recovery-vault/delete", s.handleRenewOptions)
 		s.mux.HandleFunc("POST "+prefix+"/api/v1/enroll/start", s.handleEnrollStart)
 		s.mux.HandleFunc("OPTIONS "+prefix+"/api/v1/enroll/start", s.handleEnrollOptions)
 		s.mux.HandleFunc("GET "+prefix+"/api/v1/enroll/poll", s.handleEnrollPoll)
@@ -644,14 +649,6 @@ func (s *ConsoleServer) handleRenewOptions(w http.ResponseWriter, r *http.Reques
 
 func (s *ConsoleServer) handleRenew(w http.ResponseWriter, r *http.Request) {
 	setCORSHeaders(w, "POST, OPTIONS")
-	if s.queries == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"ok":    false,
-			"error": "database not initialized",
-		})
-		return
-	}
-
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var body struct {
 		NodeAuthProtoB64 string `json:"node_auth_proto_b64"`
@@ -663,70 +660,13 @@ func (s *ConsoleServer) handleRenew(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	rawAuth, err := decodeBase64Flexible(body.NodeAuthProtoB64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"ok":    false,
-			"error": err.Error(),
-		})
-		return
-	}
-	nodeAuth := &sshcastv1.NodeAuth{}
-	if err := proto.Unmarshal(rawAuth, nodeAuth); err != nil || nodeAuth.GetGrant() == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"ok":    false,
-			"error": "invalid NodeAuth protobuf",
-		})
+
+	user, grant, now, ok := s.authenticateNodeRequest(w, r, body.NodeAuthProtoB64, sshcastv1.NodeRole_NODE_ROLE_UNSPECIFIED)
+	if !ok {
 		return
 	}
 
-	// Clone NodeAuth and clear UserCert before VerifyNodeAuth because
-	// CanonicalNodeGrantBytes and CanonicalNodeAuthBytes do not cover UserCert,
-	// and an expired embedded UserCert must still be renewable.
-	clonedAuth := proto.Clone(nodeAuth).(*sshcastv1.NodeAuth)
-	if clonedAuth.GetGrant() != nil {
-		clonedAuth.Grant.UserCert = nil
-	}
-	now := time.Now().UTC()
-	nowMs := uint64(now.UnixMilli())
-	if err := auth.VerifyNodeAuth(clonedAuth, sshcastv1.NodeRole_NODE_ROLE_UNSPECIFIED, nowMs, auth.DefaultMaxClockSkewMs); err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{
-			"ok":    false,
-			"error": fmt.Sprintf("node auth verification failed: %v", err),
-		})
-		return
-	}
-
-	userPubBytes := clonedAuth.GetGrant().GetUserPubkey()
-	userPubHex := "sc_pub_" + hex.EncodeToString(userPubBytes)
-
-	user, err := s.queries.GetUserByPubkey(r.Context(), userPubHex)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusForbidden, map[string]any{
-				"ok":     false,
-				"status": "unregistered",
-				"error":  "user public key is not registered",
-			})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"ok":    false,
-			"error": "failed to query user",
-		})
-		return
-	}
-
-	if user.Status != "active" {
-		writeJSON(w, http.StatusForbidden, map[string]any{
-			"ok":     false,
-			"status": user.Status,
-			"error":  fmt.Sprintf("user status is %s", user.Status),
-		})
-		return
-	}
-
-	cert, certToken, err := s.mintUserCert(userPubBytes, user.UserID, s.cfg.DefaultExpiresDays, now)
+	cert, certToken, err := s.mintUserCert(grant.GetUserPubkey(), user.UserID, s.cfg.DefaultExpiresDays, now)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"ok":    false,

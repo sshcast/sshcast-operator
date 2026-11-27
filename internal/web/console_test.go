@@ -233,7 +233,7 @@ func (e *testEnv) pollEnrollment(state, pollToken string) (int, map[string]any) 
 	return resp.StatusCode, out
 }
 
-func buildSignedNodeAuth(t *testing.T, userPub ed25519.PublicKey, userPriv ed25519.PrivateKey, embeddedCert *sshcastv1.UserCert) *sshcastv1.NodeAuth {
+func buildSignedNodeAuthWithRole(t *testing.T, userPub ed25519.PublicKey, userPriv ed25519.PrivateKey, embeddedCert *sshcastv1.UserCert, role sshcastv1.NodeRole, nodeID string) *sshcastv1.NodeAuth {
 	t.Helper()
 	nodePub, nodePriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -243,8 +243,8 @@ func buildSignedNodeAuth(t *testing.T, userPub ed25519.PublicKey, userPriv ed255
 	grant := &sshcastv1.NodeGrant{
 		UserId:           auth.DeriveUserID(userPub),
 		UserPubkey:       userPub,
-		NodeId:           "laptop-test",
-		Role:             sshcastv1.NodeRole_NODE_ROLE_CLIENT,
+		NodeId:           nodeID,
+		Role:             role,
 		NodePubkey:       nodePub,
 		IssuedAtUnixSec:  uint64(now.Add(-1 * time.Hour).Unix()),
 		ExpiresAtUnixSec: uint64(now.Add(24 * time.Hour).Unix()),
@@ -264,6 +264,10 @@ func buildSignedNodeAuth(t *testing.T, userPub ed25519.PublicKey, userPriv ed255
 		t.Fatalf("SignNodeAuth: %v", err)
 	}
 	return nodeAuth
+}
+
+func buildSignedNodeAuth(t *testing.T, userPub ed25519.PublicKey, userPriv ed25519.PrivateKey, embeddedCert *sshcastv1.UserCert) *sshcastv1.NodeAuth {
+	return buildSignedNodeAuthWithRole(t, userPub, userPriv, embeddedCert, sshcastv1.NodeRole_NODE_ROLE_CLIENT, "laptop-test")
 }
 
 func TestConsoleLoginAndKeySigningFlow(t *testing.T) {
@@ -768,5 +772,143 @@ func TestBannedGitHubUserCannotBypassWithFreshKey(t *testing.T) {
 	_ = renewResp.Body.Close()
 	if renewResp.StatusCode != http.StatusForbidden || renewOut["status"] != "unregistered" {
 		t.Fatalf("expected 403 unregistered for key2, got %d %+v", renewResp.StatusCode, renewOut)
+	}
+}
+
+func TestRecoveryVaultEndpointsAndAccessControl(t *testing.T) {
+	env := newTestEnv(t)
+
+	// Verify CORS preflight on OPTIONS /api/v1/recovery-vault
+	optReq, _ := http.NewRequest(http.MethodOptions, env.ts.URL+"/api/v1/recovery-vault", nil)
+	optResp, err := http.DefaultClient.Do(optReq)
+	if err != nil {
+		t.Fatalf("OPTIONS /api/v1/recovery-vault: %v", err)
+	}
+	_ = optResp.Body.Close()
+	if optResp.StatusCode != http.StatusNoContent || optResp.Header.Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("unexpected OPTIONS response: status=%d cors=%q", optResp.StatusCode, optResp.Header.Get("Access-Control-Allow-Origin"))
+	}
+
+	// Register an active user.
+	userPub, userPriv, _ := ed25519.GenerateKey(rand.Reader)
+	userPubToken := "sc_pub_" + hex.EncodeToString(userPub)
+	state, pollToken, authURL := env.startEnrollment(userPubToken)
+	r, err := http.Get(authURL)
+	if err != nil {
+		t.Fatalf("GET auth_url: %v", err)
+	}
+	_ = r.Body.Close()
+	_, pollOut := env.pollEnrollment(state, pollToken)
+	if pollOut["status"] != "approved" {
+		t.Fatalf("expected approved enrollment, got %+v", pollOut)
+	}
+
+	clientAuth := buildSignedNodeAuthWithRole(t, userPub, userPriv, nil, sshcastv1.NodeRole_NODE_ROLE_CLIENT, "workstation-a")
+	rawClientAuth, _ := proto.Marshal(clientAuth)
+	clientAuthB64 := base64.StdEncoding.EncodeToString(rawClientAuth)
+
+	relayAuth := buildSignedNodeAuthWithRole(t, userPub, userPriv, nil, sshcastv1.NodeRole_NODE_ROLE_RELAY, "relay-1")
+	rawRelayAuth, _ := proto.Marshal(relayAuth)
+	relayAuthB64 := base64.StdEncoding.EncodeToString(rawRelayAuth)
+
+	// 1. Initial status is configured=false.
+	statusReq, _ := json.Marshal(map[string]any{"node_auth_proto_b64": clientAuthB64})
+	statusResp, err := http.Post(env.ts.URL+"/api/v1/recovery-vault/status", "application/json", bytes.NewReader(statusReq))
+	if err != nil {
+		t.Fatalf("status initial: %v", err)
+	}
+	var statusOut map[string]any
+	_ = json.NewDecoder(statusResp.Body).Decode(&statusOut)
+	_ = statusResp.Body.Close()
+	if statusResp.StatusCode != http.StatusOK || statusOut["configured"] != false {
+		t.Fatalf("expected configured=false, got %d %+v", statusResp.StatusCode, statusOut)
+	}
+
+	// 2. Relay-role NodeAuth must be rejected with 403 Forbidden.
+	relayResp, err := http.Post(env.ts.URL+"/api/v1/recovery-vault/status", "application/json", bytes.NewReader([]byte(`{"node_auth_proto_b64":"`+relayAuthB64+`"}`)))
+	if err != nil {
+		t.Fatalf("relay status: %v", err)
+	}
+	_ = relayResp.Body.Close()
+	if relayResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for relay NodeAuth, got %d", relayResp.StatusCode)
+	}
+
+	// 3. Upsert recovery vault.
+	salt := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x11}, 16))
+	nonce := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x22}, 12))
+	ct := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x33}, 48))
+	upsertPayload, _ := json.Marshal(map[string]any{
+		"node_auth_proto_b64": clientAuthB64,
+		"vault": map[string]any{
+			"version":        1,
+			"kdf_alg":        "scrypt",
+			"kdf_params":     map[string]any{"log_n": 15, "r": 8, "p": 1},
+			"salt_b64":       salt,
+			"nonce_b64":      nonce,
+			"ciphertext_b64": ct,
+		},
+	})
+	upsertResp, err := http.Post(env.ts.URL+"/api/v1/recovery-vault", "application/json", bytes.NewReader(upsertPayload))
+	if err != nil {
+		t.Fatalf("upsert vault: %v", err)
+	}
+	var upsertOut map[string]any
+	_ = json.NewDecoder(upsertResp.Body).Decode(&upsertOut)
+	_ = upsertResp.Body.Close()
+	if upsertResp.StatusCode != http.StatusOK || upsertOut["ok"] != true {
+		t.Fatalf("expected 200 ok on upsert, got %d %+v", upsertResp.StatusCode, upsertOut)
+	}
+
+	// 4. Status now returns configured=true (via /console prefix too).
+	statusResp2, err := http.Post(env.ts.URL+"/console/api/v1/recovery-vault/status", "application/json", bytes.NewReader(statusReq))
+	if err != nil {
+		t.Fatalf("status after upsert: %v", err)
+	}
+	var statusOut2 map[string]any
+	_ = json.NewDecoder(statusResp2.Body).Decode(&statusOut2)
+	_ = statusResp2.Body.Close()
+	if statusResp2.StatusCode != http.StatusOK || statusOut2["configured"] != true {
+		t.Fatalf("expected configured=true, got %d %+v", statusResp2.StatusCode, statusOut2)
+	}
+
+	// 5. Delete vault and confirm configured=false again.
+	delResp, err := http.Post(env.ts.URL+"/api/v1/recovery-vault/delete", "application/json", bytes.NewReader(statusReq))
+	if err != nil {
+		t.Fatalf("delete vault: %v", err)
+	}
+	_ = delResp.Body.Close()
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on delete, got %d", delResp.StatusCode)
+	}
+	statusResp3, err := http.Post(env.ts.URL+"/api/v1/recovery-vault/status", "application/json", bytes.NewReader(statusReq))
+	if err != nil {
+		t.Fatalf("status after delete: %v", err)
+	}
+	var statusOut3 map[string]any
+	_ = json.NewDecoder(statusResp3.Body).Decode(&statusOut3)
+	_ = statusResp3.Body.Close()
+	if statusResp3.StatusCode != http.StatusOK || statusOut3["configured"] != false {
+		t.Fatalf("expected configured=false after delete, got %d %+v", statusResp3.StatusCode, statusOut3)
+	}
+
+	// 6. Banned user is rejected on vault endpoints.
+	admin := env.adminClient()
+	dbUser, _ := env.queries.GetUserByPubkey(t.Context(), userPubToken)
+	banResp, err := admin.PostForm(env.ts.URL+"/console/users/status", url.Values{
+		"id":     {strconv.FormatInt(dbUser.ID, 10)},
+		"status": {"banned"},
+	})
+	if err != nil {
+		t.Fatalf("ban user: %v", err)
+	}
+	_ = banResp.Body.Close()
+	bannedResp, err := http.Post(env.ts.URL+"/api/v1/recovery-vault/status", "application/json", bytes.NewReader(statusReq))
+	if err != nil {
+		t.Fatalf("banned vault status: %v", err)
+	}
+	_ = bannedResp.Body.Close()
+	if bannedResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for banned user vault status, got %d", bannedResp.StatusCode)
 	}
 }
