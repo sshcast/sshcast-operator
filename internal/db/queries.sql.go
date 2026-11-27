@@ -10,6 +10,109 @@ import (
 	"database/sql"
 )
 
+const approvePairingRequest = `-- name: ApprovePairingRequest :one
+UPDATE pairing_requests
+SET status = 'approved',
+    approver_node_id = ?,
+    approver_eph_x25519_pub_b64 = ?,
+    approver_signature_b64 = ?,
+    handoff_nonce_b64 = ?,
+    encrypted_handoff_b64 = ?
+WHERE id = ? AND target_user_pubkey = ? AND status = 'awaiting_peer'
+RETURNING id, oauth_state, user_id, target_user_pubkey, github_login, node_name, os_name, node_pubkey_b64, eph_x25519_pub_b64, status, approver_node_id, approver_eph_x25519_pub_b64, approver_signature_b64, handoff_nonce_b64, encrypted_handoff_b64, error_msg, expires_at, created_at
+`
+
+type ApprovePairingRequestParams struct {
+	ApproverNodeID          string
+	ApproverEphX25519PubB64 string
+	ApproverSignatureB64    string
+	HandoffNonceB64         string
+	EncryptedHandoffB64     string
+	ID                      string
+	TargetUserPubkey        string
+}
+
+func (q *Queries) ApprovePairingRequest(ctx context.Context, arg ApprovePairingRequestParams) (PairingRequest, error) {
+	row := q.db.QueryRowContext(ctx, approvePairingRequest,
+		arg.ApproverNodeID,
+		arg.ApproverEphX25519PubB64,
+		arg.ApproverSignatureB64,
+		arg.HandoffNonceB64,
+		arg.EncryptedHandoffB64,
+		arg.ID,
+		arg.TargetUserPubkey,
+	)
+	var i PairingRequest
+	err := row.Scan(
+		&i.ID,
+		&i.OauthState,
+		&i.UserID,
+		&i.TargetUserPubkey,
+		&i.GithubLogin,
+		&i.NodeName,
+		&i.OsName,
+		&i.NodePubkeyB64,
+		&i.EphX25519PubB64,
+		&i.Status,
+		&i.ApproverNodeID,
+		&i.ApproverEphX25519PubB64,
+		&i.ApproverSignatureB64,
+		&i.HandoffNonceB64,
+		&i.EncryptedHandoffB64,
+		&i.ErrorMsg,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const bindPairingRequestToUser = `-- name: BindPairingRequestToUser :one
+UPDATE pairing_requests
+SET user_id = ?, target_user_pubkey = ?, github_login = ?, status = 'awaiting_peer', expires_at = ?
+WHERE oauth_state = ?
+RETURNING id, oauth_state, user_id, target_user_pubkey, github_login, node_name, os_name, node_pubkey_b64, eph_x25519_pub_b64, status, approver_node_id, approver_eph_x25519_pub_b64, approver_signature_b64, handoff_nonce_b64, encrypted_handoff_b64, error_msg, expires_at, created_at
+`
+
+type BindPairingRequestToUserParams struct {
+	UserID           sql.NullInt64
+	TargetUserPubkey string
+	GithubLogin      string
+	ExpiresAt        int64
+	OauthState       string
+}
+
+func (q *Queries) BindPairingRequestToUser(ctx context.Context, arg BindPairingRequestToUserParams) (PairingRequest, error) {
+	row := q.db.QueryRowContext(ctx, bindPairingRequestToUser,
+		arg.UserID,
+		arg.TargetUserPubkey,
+		arg.GithubLogin,
+		arg.ExpiresAt,
+		arg.OauthState,
+	)
+	var i PairingRequest
+	err := row.Scan(
+		&i.ID,
+		&i.OauthState,
+		&i.UserID,
+		&i.TargetUserPubkey,
+		&i.GithubLogin,
+		&i.NodeName,
+		&i.OsName,
+		&i.NodePubkeyB64,
+		&i.EphX25519PubB64,
+		&i.Status,
+		&i.ApproverNodeID,
+		&i.ApproverEphX25519PubB64,
+		&i.ApproverSignatureB64,
+		&i.HandoffNonceB64,
+		&i.EncryptedHandoffB64,
+		&i.ErrorMsg,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const createOAuthSession = `-- name: CreateOAuthSession :one
 INSERT INTO oauth_sessions (
     state,
@@ -60,12 +163,102 @@ func (q *Queries) CreateOAuthSession(ctx context.Context, arg CreateOAuthSession
 	return i, err
 }
 
+const createPairingRequest = `-- name: CreatePairingRequest :one
+INSERT INTO pairing_requests (
+    id,
+    oauth_state,
+    user_id,
+    target_user_pubkey,
+    github_login,
+    node_name,
+    os_name,
+    node_pubkey_b64,
+    eph_x25519_pub_b64,
+    status,
+    approver_node_id,
+    approver_eph_x25519_pub_b64,
+    approver_signature_b64,
+    handoff_nonce_b64,
+    encrypted_handoff_b64,
+    error_msg,
+    expires_at,
+    created_at
+) VALUES (?, ?, NULL, '', '', ?, ?, ?, ?, ?, '', '', '', '', '', '', ?, ?)
+RETURNING id, oauth_state, user_id, target_user_pubkey, github_login, node_name, os_name, node_pubkey_b64, eph_x25519_pub_b64, status, approver_node_id, approver_eph_x25519_pub_b64, approver_signature_b64, handoff_nonce_b64, encrypted_handoff_b64, error_msg, expires_at, created_at
+`
+
+type CreatePairingRequestParams struct {
+	ID              string
+	OauthState      string
+	NodeName        string
+	OsName          string
+	NodePubkeyB64   string
+	EphX25519PubB64 string
+	Status          string
+	ExpiresAt       int64
+	CreatedAt       int64
+}
+
+func (q *Queries) CreatePairingRequest(ctx context.Context, arg CreatePairingRequestParams) (PairingRequest, error) {
+	row := q.db.QueryRowContext(ctx, createPairingRequest,
+		arg.ID,
+		arg.OauthState,
+		arg.NodeName,
+		arg.OsName,
+		arg.NodePubkeyB64,
+		arg.EphX25519PubB64,
+		arg.Status,
+		arg.ExpiresAt,
+		arg.CreatedAt,
+	)
+	var i PairingRequest
+	err := row.Scan(
+		&i.ID,
+		&i.OauthState,
+		&i.UserID,
+		&i.TargetUserPubkey,
+		&i.GithubLogin,
+		&i.NodeName,
+		&i.OsName,
+		&i.NodePubkeyB64,
+		&i.EphX25519PubB64,
+		&i.Status,
+		&i.ApproverNodeID,
+		&i.ApproverEphX25519PubB64,
+		&i.ApproverSignatureB64,
+		&i.HandoffNonceB64,
+		&i.EncryptedHandoffB64,
+		&i.ErrorMsg,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const deleteExpiredOAuthSessions = `-- name: DeleteExpiredOAuthSessions :exec
 DELETE FROM oauth_sessions WHERE expires_at <= ?
 `
 
 func (q *Queries) DeleteExpiredOAuthSessions(ctx context.Context, expiresAt int64) error {
 	_, err := q.db.ExecContext(ctx, deleteExpiredOAuthSessions, expiresAt)
+	return err
+}
+
+const deleteExpiredPairingRequests = `-- name: DeleteExpiredPairingRequests :exec
+DELETE FROM pairing_requests WHERE expires_at <= ?
+`
+
+func (q *Queries) DeleteExpiredPairingRequests(ctx context.Context, expiresAt int64) error {
+	_, err := q.db.ExecContext(ctx, deleteExpiredPairingRequests, expiresAt)
+	return err
+}
+
+const deleteRecoveryVaultByUserID = `-- name: DeleteRecoveryVaultByUserID :exec
+DELETE FROM recovery_vaults WHERE user_id = ?
+`
+
+func (q *Queries) DeleteRecoveryVaultByUserID(ctx context.Context, userID int64) error {
+	_, err := q.db.ExecContext(ctx, deleteRecoveryVaultByUserID, userID)
 	return err
 }
 
@@ -89,6 +282,87 @@ func (q *Queries) GetOAuthSession(ctx context.Context, state string) (OauthSessi
 	return i, err
 }
 
+const getPairingRequestByID = `-- name: GetPairingRequestByID :one
+SELECT id, oauth_state, user_id, target_user_pubkey, github_login, node_name, os_name, node_pubkey_b64, eph_x25519_pub_b64, status, approver_node_id, approver_eph_x25519_pub_b64, approver_signature_b64, handoff_nonce_b64, encrypted_handoff_b64, error_msg, expires_at, created_at FROM pairing_requests WHERE id = ? LIMIT 1
+`
+
+func (q *Queries) GetPairingRequestByID(ctx context.Context, id string) (PairingRequest, error) {
+	row := q.db.QueryRowContext(ctx, getPairingRequestByID, id)
+	var i PairingRequest
+	err := row.Scan(
+		&i.ID,
+		&i.OauthState,
+		&i.UserID,
+		&i.TargetUserPubkey,
+		&i.GithubLogin,
+		&i.NodeName,
+		&i.OsName,
+		&i.NodePubkeyB64,
+		&i.EphX25519PubB64,
+		&i.Status,
+		&i.ApproverNodeID,
+		&i.ApproverEphX25519PubB64,
+		&i.ApproverSignatureB64,
+		&i.HandoffNonceB64,
+		&i.EncryptedHandoffB64,
+		&i.ErrorMsg,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getPairingRequestByState = `-- name: GetPairingRequestByState :one
+SELECT id, oauth_state, user_id, target_user_pubkey, github_login, node_name, os_name, node_pubkey_b64, eph_x25519_pub_b64, status, approver_node_id, approver_eph_x25519_pub_b64, approver_signature_b64, handoff_nonce_b64, encrypted_handoff_b64, error_msg, expires_at, created_at FROM pairing_requests WHERE oauth_state = ? LIMIT 1
+`
+
+func (q *Queries) GetPairingRequestByState(ctx context.Context, oauthState string) (PairingRequest, error) {
+	row := q.db.QueryRowContext(ctx, getPairingRequestByState, oauthState)
+	var i PairingRequest
+	err := row.Scan(
+		&i.ID,
+		&i.OauthState,
+		&i.UserID,
+		&i.TargetUserPubkey,
+		&i.GithubLogin,
+		&i.NodeName,
+		&i.OsName,
+		&i.NodePubkeyB64,
+		&i.EphX25519PubB64,
+		&i.Status,
+		&i.ApproverNodeID,
+		&i.ApproverEphX25519PubB64,
+		&i.ApproverSignatureB64,
+		&i.HandoffNonceB64,
+		&i.EncryptedHandoffB64,
+		&i.ErrorMsg,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getRecoveryVaultByUserID = `-- name: GetRecoveryVaultByUserID :one
+SELECT user_id, user_pubkey, version, kdf_alg, kdf_params_json, salt_b64, nonce_b64, ciphertext_b64, updated_at FROM recovery_vaults WHERE user_id = ? LIMIT 1
+`
+
+func (q *Queries) GetRecoveryVaultByUserID(ctx context.Context, userID int64) (RecoveryVault, error) {
+	row := q.db.QueryRowContext(ctx, getRecoveryVaultByUserID, userID)
+	var i RecoveryVault
+	err := row.Scan(
+		&i.UserID,
+		&i.UserPubkey,
+		&i.Version,
+		&i.KdfAlg,
+		&i.KdfParamsJson,
+		&i.SaltB64,
+		&i.NonceB64,
+		&i.CiphertextB64,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getSetting = `-- name: GetSetting :one
 SELECT "key", value, updated_at FROM operator_settings WHERE key = ? LIMIT 1
 `
@@ -106,6 +380,29 @@ SELECT id, user_pubkey, user_id, github_id, github_login, github_created_at, sta
 
 func (q *Queries) GetUserByGitHubID(ctx context.Context, githubID sql.NullInt64) (User, error) {
 	row := q.db.QueryRowContext(ctx, getUserByGitHubID, githubID)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.UserPubkey,
+		&i.UserID,
+		&i.GithubID,
+		&i.GithubLogin,
+		&i.GithubCreatedAt,
+		&i.Status,
+		&i.Note,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.LastRenewedAt,
+	)
+	return i, err
+}
+
+const getUserByID = `-- name: GetUserByID :one
+SELECT id, user_pubkey, user_id, github_id, github_login, github_created_at, status, note, created_at, updated_at, last_renewed_at FROM users WHERE id = ? LIMIT 1
+`
+
+func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
+	row := q.db.QueryRowContext(ctx, getUserByID, id)
 	var i User
 	err := row.Scan(
 		&i.ID,
@@ -205,6 +502,59 @@ func (q *Queries) InsertUser(ctx context.Context, arg InsertUserParams) (User, e
 	return i, err
 }
 
+const listPendingPairingRequestsByPubkey = `-- name: ListPendingPairingRequestsByPubkey :many
+SELECT id, oauth_state, user_id, target_user_pubkey, github_login, node_name, os_name, node_pubkey_b64, eph_x25519_pub_b64, status, approver_node_id, approver_eph_x25519_pub_b64, approver_signature_b64, handoff_nonce_b64, encrypted_handoff_b64, error_msg, expires_at, created_at FROM pairing_requests
+WHERE target_user_pubkey = ? AND status = 'awaiting_peer' AND expires_at > ?
+ORDER BY created_at ASC
+`
+
+type ListPendingPairingRequestsByPubkeyParams struct {
+	TargetUserPubkey string
+	ExpiresAt        int64
+}
+
+func (q *Queries) ListPendingPairingRequestsByPubkey(ctx context.Context, arg ListPendingPairingRequestsByPubkeyParams) ([]PairingRequest, error) {
+	rows, err := q.db.QueryContext(ctx, listPendingPairingRequestsByPubkey, arg.TargetUserPubkey, arg.ExpiresAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PairingRequest
+	for rows.Next() {
+		var i PairingRequest
+		if err := rows.Scan(
+			&i.ID,
+			&i.OauthState,
+			&i.UserID,
+			&i.TargetUserPubkey,
+			&i.GithubLogin,
+			&i.NodeName,
+			&i.OsName,
+			&i.NodePubkeyB64,
+			&i.EphX25519PubB64,
+			&i.Status,
+			&i.ApproverNodeID,
+			&i.ApproverEphX25519PubB64,
+			&i.ApproverSignatureB64,
+			&i.HandoffNonceB64,
+			&i.EncryptedHandoffB64,
+			&i.ErrorMsg,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUsers = `-- name: ListUsers :many
 SELECT id, user_pubkey, user_id, github_id, github_login, github_created_at, status, note, created_at, updated_at, last_renewed_at FROM users
 ORDER BY created_at DESC, id DESC
@@ -243,6 +593,45 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const setPairingRequestTerminalStatus = `-- name: SetPairingRequestTerminalStatus :one
+UPDATE pairing_requests
+SET status = ?, error_msg = ?
+WHERE id = ? AND status = 'awaiting_peer'
+RETURNING id, oauth_state, user_id, target_user_pubkey, github_login, node_name, os_name, node_pubkey_b64, eph_x25519_pub_b64, status, approver_node_id, approver_eph_x25519_pub_b64, approver_signature_b64, handoff_nonce_b64, encrypted_handoff_b64, error_msg, expires_at, created_at
+`
+
+type SetPairingRequestTerminalStatusParams struct {
+	Status   string
+	ErrorMsg string
+	ID       string
+}
+
+func (q *Queries) SetPairingRequestTerminalStatus(ctx context.Context, arg SetPairingRequestTerminalStatusParams) (PairingRequest, error) {
+	row := q.db.QueryRowContext(ctx, setPairingRequestTerminalStatus, arg.Status, arg.ErrorMsg, arg.ID)
+	var i PairingRequest
+	err := row.Scan(
+		&i.ID,
+		&i.OauthState,
+		&i.UserID,
+		&i.TargetUserPubkey,
+		&i.GithubLogin,
+		&i.NodeName,
+		&i.OsName,
+		&i.NodePubkeyB64,
+		&i.EphX25519PubB64,
+		&i.Status,
+		&i.ApproverNodeID,
+		&i.ApproverEphX25519PubB64,
+		&i.ApproverSignatureB64,
+		&i.HandoffNonceB64,
+		&i.EncryptedHandoffB64,
+		&i.ErrorMsg,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const setUserStatus = `-- name: SetUserStatus :one
@@ -416,6 +805,69 @@ func (q *Queries) UpsertManualUser(ctx context.Context, arg UpsertManualUserPara
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.LastRenewedAt,
+	)
+	return i, err
+}
+
+const upsertRecoveryVault = `-- name: UpsertRecoveryVault :one
+INSERT INTO recovery_vaults (
+    user_id,
+    user_pubkey,
+    version,
+    kdf_alg,
+    kdf_params_json,
+    salt_b64,
+    nonce_b64,
+    ciphertext_b64,
+    updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(user_id) DO UPDATE SET
+    user_pubkey = excluded.user_pubkey,
+    version = excluded.version,
+    kdf_alg = excluded.kdf_alg,
+    kdf_params_json = excluded.kdf_params_json,
+    salt_b64 = excluded.salt_b64,
+    nonce_b64 = excluded.nonce_b64,
+    ciphertext_b64 = excluded.ciphertext_b64,
+    updated_at = excluded.updated_at
+RETURNING user_id, user_pubkey, version, kdf_alg, kdf_params_json, salt_b64, nonce_b64, ciphertext_b64, updated_at
+`
+
+type UpsertRecoveryVaultParams struct {
+	UserID        int64
+	UserPubkey    string
+	Version       int64
+	KdfAlg        string
+	KdfParamsJson string
+	SaltB64       string
+	NonceB64      string
+	CiphertextB64 string
+	UpdatedAt     int64
+}
+
+func (q *Queries) UpsertRecoveryVault(ctx context.Context, arg UpsertRecoveryVaultParams) (RecoveryVault, error) {
+	row := q.db.QueryRowContext(ctx, upsertRecoveryVault,
+		arg.UserID,
+		arg.UserPubkey,
+		arg.Version,
+		arg.KdfAlg,
+		arg.KdfParamsJson,
+		arg.SaltB64,
+		arg.NonceB64,
+		arg.CiphertextB64,
+		arg.UpdatedAt,
+	)
+	var i RecoveryVault
+	err := row.Scan(
+		&i.UserID,
+		&i.UserPubkey,
+		&i.Version,
+		&i.KdfAlg,
+		&i.KdfParamsJson,
+		&i.SaltB64,
+		&i.NonceB64,
+		&i.CiphertextB64,
+		&i.UpdatedAt,
 	)
 	return i, err
 }

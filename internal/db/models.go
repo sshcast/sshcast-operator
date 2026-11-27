@@ -25,6 +25,39 @@ type OperatorSetting struct {
 	UpdatedAt int64
 }
 
+type PairingRequest struct {
+	ID                      string
+	OauthState              string
+	UserID                  sql.NullInt64
+	TargetUserPubkey        string
+	GithubLogin             string
+	NodeName                string
+	OsName                  string
+	NodePubkeyB64           string
+	EphX25519PubB64         string
+	Status                  string
+	ApproverNodeID          string
+	ApproverEphX25519PubB64 string
+	ApproverSignatureB64    string
+	HandoffNonceB64         string
+	EncryptedHandoffB64     string
+	ErrorMsg                string
+	ExpiresAt               int64
+	CreatedAt               int64
+}
+
+type RecoveryVault struct {
+	UserID        int64
+	UserPubkey    string
+	Version       int64
+	KdfAlg        string
+	KdfParamsJson string
+	SaltB64       string
+	NonceB64      string
+	CiphertextB64 string
+	UpdatedAt     int64
+}
+
 type User struct {
 	ID              int64
 	UserPubkey      string

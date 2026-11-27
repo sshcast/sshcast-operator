@@ -179,4 +179,148 @@ func TestOpenIdempotentAndQueries(t *testing.T) {
 	if err != nil || len(users2) != 3 {
 		t.Fatalf("ListUsers after reopen: len=%d err=%v", len(users2), err)
 	}
+
+	// Recovery vault upsert, fetch, update, and delete.
+	byID, err := q2.GetUserByID(ctx, inserted.ID)
+	if err != nil || byID.UserPubkey != "sc_pub_aabbccdd" {
+		t.Fatalf("GetUserByID: user=%+v err=%v", byID, err)
+	}
+	vault1, err := q2.UpsertRecoveryVault(ctx, UpsertRecoveryVaultParams{
+		UserID:        inserted.ID,
+		UserPubkey:    byID.UserPubkey,
+		Version:       1,
+		KdfAlg:        "scrypt",
+		KdfParamsJson: `{"log_n":15,"r":8,"p":1}`,
+		SaltB64:       "c2FsdA==",
+		NonceB64:      "bm9uY2U=",
+		CiphertextB64: "Y2lwaGVy",
+		UpdatedAt:     now + 70,
+	})
+	if err != nil || vault1.KdfAlg != "scrypt" {
+		t.Fatalf("UpsertRecoveryVault 1: vault=%+v err=%v", vault1, err)
+	}
+	vault2, err := q2.UpsertRecoveryVault(ctx, UpsertRecoveryVaultParams{
+		UserID:        inserted.ID,
+		UserPubkey:    byID.UserPubkey,
+		Version:       1,
+		KdfAlg:        "scrypt",
+		KdfParamsJson: `{"log_n":16,"r":8,"p":1}`,
+		SaltB64:       "c2FsdDI=",
+		NonceB64:      "bm9uY2Uy",
+		CiphertextB64: "Y2lwaGVyMg==",
+		UpdatedAt:     now + 80,
+	})
+	if err != nil || vault2.CiphertextB64 != "Y2lwaGVyMg==" {
+		t.Fatalf("UpsertRecoveryVault 2: vault=%+v err=%v", vault2, err)
+	}
+	gotVault, err := q2.GetRecoveryVaultByUserID(ctx, inserted.ID)
+	if err != nil || gotVault.UpdatedAt != now+80 {
+		t.Fatalf("GetRecoveryVaultByUserID: vault=%+v err=%v", gotVault, err)
+	}
+	if err := q2.DeleteRecoveryVaultByUserID(ctx, inserted.ID); err != nil {
+		t.Fatalf("DeleteRecoveryVaultByUserID: %v", err)
+	}
+	if _, err := q2.GetRecoveryVaultByUserID(ctx, inserted.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected deleted vault, got err=%v", err)
+	}
+
+	// Pairing request create, bind, list, approve, deny, and expiration cleanup.
+	prLive, err := q2.CreatePairingRequest(ctx, CreatePairingRequestParams{
+		ID:              "pair-live",
+		OauthState:      "state-pair-live",
+		NodeName:        "workstation-b",
+		OsName:          "macos",
+		NodePubkeyB64:   "bm9kZS1wdWI=",
+		EphX25519PubB64: "ZXBoLXB1Yg==",
+		Status:          "pending_oauth",
+		ExpiresAt:       now + 900,
+		CreatedAt:       now,
+	})
+	if err != nil || prLive.UserID.Valid {
+		t.Fatalf("CreatePairingRequest live: pr=%+v err=%v", prLive, err)
+	}
+	prBound, err := q2.BindPairingRequestToUser(ctx, BindPairingRequestToUserParams{
+		UserID:           sql.NullInt64{Int64: inserted.ID, Valid: true},
+		TargetUserPubkey: byID.UserPubkey,
+		GithubLogin:      "alice-new",
+		ExpiresAt:        now + 300,
+		OauthState:       "state-pair-live",
+	})
+	if err != nil || prBound.Status != "awaiting_peer" {
+		t.Fatalf("BindPairingRequestToUser: pr=%+v err=%v", prBound, err)
+	}
+	pendingList, err := q2.ListPendingPairingRequestsByPubkey(ctx, ListPendingPairingRequestsByPubkeyParams{
+		TargetUserPubkey: byID.UserPubkey,
+		ExpiresAt:        now,
+	})
+	if err != nil || len(pendingList) != 1 || pendingList[0].ID != "pair-live" {
+		t.Fatalf("ListPendingPairingRequestsByPubkey: list=%+v err=%v", pendingList, err)
+	}
+	approvedPR, err := q2.ApprovePairingRequest(ctx, ApprovePairingRequestParams{
+		ApproverNodeID:          "workstation-a",
+		ApproverEphX25519PubB64: "YXBwLWVwaA==",
+		ApproverSignatureB64:    "c2ln",
+		HandoffNonceB64:         "bm9uY2U=",
+		EncryptedHandoffB64:     "aGFuZG9mZg==",
+		ID:                      "pair-live",
+		TargetUserPubkey:        byID.UserPubkey,
+	})
+	if err != nil || approvedPR.Status != "approved" || approvedPR.ApproverNodeID != "workstation-a" {
+		t.Fatalf("ApprovePairingRequest: pr=%+v err=%v", approvedPR, err)
+	}
+
+	if _, err := q2.CreatePairingRequest(ctx, CreatePairingRequestParams{
+		ID:              "pair-deny",
+		OauthState:      "state-pair-deny",
+		NodeName:        "workstation-c",
+		OsName:          "windows",
+		NodePubkeyB64:   "bm9kZTI=",
+		EphX25519PubB64: "ZXBoMg==",
+		Status:          "pending_oauth",
+		ExpiresAt:       now + 900,
+		CreatedAt:       now,
+	}); err != nil {
+		t.Fatalf("CreatePairingRequest deny: %v", err)
+	}
+	if _, err := q2.BindPairingRequestToUser(ctx, BindPairingRequestToUserParams{
+		UserID:           sql.NullInt64{Int64: inserted.ID, Valid: true},
+		TargetUserPubkey: byID.UserPubkey,
+		GithubLogin:      "alice-new",
+		ExpiresAt:        now + 300,
+		OauthState:       "state-pair-deny",
+	}); err != nil {
+		t.Fatalf("BindPairingRequestToUser deny: %v", err)
+	}
+	deniedPR, err := q2.SetPairingRequestTerminalStatus(ctx, SetPairingRequestTerminalStatusParams{
+		Status:   "denied",
+		ErrorMsg: "denied by workstation",
+		ID:       "pair-deny",
+	})
+	if err != nil || deniedPR.Status != "denied" {
+		t.Fatalf("SetPairingRequestTerminalStatus: pr=%+v err=%v", deniedPR, err)
+	}
+
+	if _, err := q2.CreatePairingRequest(ctx, CreatePairingRequestParams{
+		ID:              "pair-expired",
+		OauthState:      "state-pair-expired",
+		NodeName:        "old",
+		OsName:          "linux",
+		NodePubkeyB64:   "b2xk",
+		EphX25519PubB64: "b2xk",
+		Status:          "pending_oauth",
+		ExpiresAt:       now - 5,
+		CreatedAt:       now - 100,
+	}); err != nil {
+		t.Fatalf("CreatePairingRequest expired: %v", err)
+	}
+	if err := q2.DeleteExpiredPairingRequests(ctx, now); err != nil {
+		t.Fatalf("DeleteExpiredPairingRequests: %v", err)
+	}
+	if _, err := q2.GetPairingRequestByID(ctx, "pair-expired"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected expired pairing deleted, got err=%v", err)
+	}
+	gotByState, err := q2.GetPairingRequestByState(ctx, "state-pair-live")
+	if err != nil || gotByState.ID != "pair-live" {
+		t.Fatalf("GetPairingRequestByState: pr=%+v err=%v", gotByState, err)
+	}
 }
