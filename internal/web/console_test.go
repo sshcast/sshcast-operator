@@ -912,3 +912,333 @@ func TestRecoveryVaultEndpointsAndAccessControl(t *testing.T) {
 		t.Fatalf("expected 403 for banned user vault status, got %d", bannedResp.StatusCode)
 	}
 }
+
+func (e *testEnv) startPairingEnrollment(userPubToken, nodeName, osName string, nodePub, ephPub []byte) (string, string, string) {
+	e.t.Helper()
+	payload, _ := json.Marshal(map[string]any{
+		"user_pubkey":        userPubToken,
+		"supports_pairing":   true,
+		"node_name":          nodeName,
+		"os_name":            osName,
+		"node_pubkey_b64":    base64.StdEncoding.EncodeToString(nodePub),
+		"eph_x25519_pub_b64": base64.StdEncoding.EncodeToString(ephPub),
+	})
+	resp, err := http.Post(e.ts.URL+"/api/v1/enroll/start", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		e.t.Fatalf("enroll/start pairing: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		e.t.Fatalf("enroll/start pairing status=%d body=%s", resp.StatusCode, b)
+	}
+	var out struct {
+		OK        bool   `json:"ok"`
+		State     string `json:"state"`
+		PollToken string `json:"poll_token"`
+		AuthURL   string `json:"auth_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		e.t.Fatalf("decode enroll/start pairing: %v", err)
+	}
+	return out.State, out.PollToken, out.AuthURL
+}
+
+func TestDevicePairingInstantWakeupAndApprove(t *testing.T) {
+	env := newTestEnv(t)
+
+	// 1. Enroll Workstation A (keyA).
+	keyAPub, keyAPriv, _ := ed25519.GenerateKey(rand.Reader)
+	keyAToken := "sc_pub_" + hex.EncodeToString(keyAPub)
+	stateA, pollA, authURLA := env.startEnrollment(keyAToken)
+	rA, err := http.Get(authURLA)
+	if err != nil {
+		t.Fatalf("GET authURLA: %v", err)
+	}
+	_ = rA.Body.Close()
+	_, outA := env.pollEnrollment(stateA, pollA)
+	if outA["status"] != "approved" {
+		t.Fatalf("expected Workstation A approved, got %+v", outA)
+	}
+
+	clientAuthA := buildSignedNodeAuthWithRole(t, keyAPub, keyAPriv, nil, sshcastv1.NodeRole_NODE_ROLE_CLIENT, "workstation-a")
+	rawClientAuthA, _ := proto.Marshal(clientAuthA)
+	clientAuthAB64 := base64.StdEncoding.EncodeToString(rawClientAuthA)
+
+	// Upload a recovery vault on Workstation A.
+	upsertPayload, _ := json.Marshal(map[string]any{
+		"node_auth_proto_b64": clientAuthAB64,
+		"vault": map[string]any{
+			"version":        1,
+			"kdf_alg":        "scrypt",
+			"kdf_params":     map[string]any{"log_n": 15, "r": 8, "p": 1},
+			"salt_b64":       base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x41}, 16)),
+			"nonce_b64":      base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 12)),
+			"ciphertext_b64": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x43}, 48)),
+		},
+	})
+	upResp, err := http.Post(env.ts.URL+"/api/v1/recovery-vault", "application/json", bytes.NewReader(upsertPayload))
+	if err != nil {
+		t.Fatalf("upsert vault: %v", err)
+	}
+	_ = upResp.Body.Close()
+	if upResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on vault upsert, got %d", upResp.StatusCode)
+	}
+
+	// 2. Start Workstation A long-poll in background.
+	type pollResult struct {
+		elapsed time.Duration
+		status  int
+		body    map[string]any
+		err     error
+	}
+	pollResCh := make(chan pollResult, 1)
+	go func() {
+		t0 := time.Now()
+		reqBody, _ := json.Marshal(map[string]any{
+			"node_auth_proto_b64": clientAuthAB64,
+			"timeout_secs":        20,
+		})
+		resp, err := http.Post(env.ts.URL+"/api/v1/pairing/poll", "application/json", bytes.NewReader(reqBody))
+		if err != nil {
+			pollResCh <- pollResult{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		pollResCh <- pollResult{elapsed: time.Since(t0), status: resp.StatusCode, body: out}
+	}()
+
+	time.Sleep(80 * time.Millisecond)
+
+	// 3. Workstation B starts pairing enrollment with a fresh keyB and finishes GitHub OAuth.
+	keyBPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyBToken := "sc_pub_" + hex.EncodeToString(keyBPub)
+	nodeBPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	ephBPub := bytes.Repeat([]byte{0x77}, 32)
+	stateB, pollB, authURLB := env.startPairingEnrollment(keyBToken, "macbook-b", "macos", nodeBPub, ephBPub)
+
+	rB, err := http.Get(authURLB)
+	if err != nil {
+		t.Fatalf("GET authURLB: %v", err)
+	}
+	bHTML, _ := io.ReadAll(rB.Body)
+	_ = rB.Body.Close()
+	if rB.StatusCode != http.StatusOK || !strings.Contains(string(bHTML), "Confirm New Workstation") {
+		t.Fatalf("expected Confirm New Workstation page, got %d: %s", rB.StatusCode, bHTML)
+	}
+
+	// Workstation A long-poll must wake up immediately (< 3s, well under 20s timeout)!
+	prRes := <-pollResCh
+	if prRes.err != nil {
+		t.Fatalf("pairing poll err: %v", prRes.err)
+	}
+	if prRes.status != http.StatusOK || prRes.elapsed >= 3*time.Second {
+		t.Fatalf("expected fast 200 wakeup, got status=%d elapsed=%v body=%+v", prRes.status, prRes.elapsed, prRes.body)
+	}
+	reqs, _ := prRes.body["requests"].([]any)
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 pending pairing request, got %+v", prRes.body)
+	}
+	reqItem := reqs[0].(map[string]any)
+	pairingID := reqItem["pairing_id"].(string)
+	if reqItem["node_name"] != "macbook-b" || reqItem["os_name"] != "macos" || reqItem["github_login"] != "mature-user" {
+		t.Fatalf("unexpected pairing item: %+v", reqItem)
+	}
+
+	// Existing user's UserPubkey in DB must NOT have been overwritten!
+	dbUser, err := env.queries.GetUserByPubkey(t.Context(), keyAToken)
+	if err != nil || dbUser.UserPubkey != keyAToken {
+		t.Fatalf("expected keyA preserved, got user=%+v err=%v", dbUser, err)
+	}
+
+	// Workstation B poll sees pairing_required + recovery_vault.
+	codeB, pollOutB := env.pollEnrollment(stateB, pollB)
+	if codeB != http.StatusOK || pollOutB["status"] != "pairing_required" || pollOutB["existing_user_pubkey"] != keyAToken || pollOutB["has_recovery_vault"] != true {
+		t.Fatalf("unexpected pairing_required poll response: %d %+v", codeB, pollOutB)
+	}
+	if _, ok := pollOutB["recovery_vault"].(map[string]any); !ok {
+		t.Fatalf("expected recovery_vault in pairing_required response: %+v", pollOutB)
+	}
+
+	// 4. Workstation A approves pairing request with encrypted handoff fields.
+	approverEph := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x88}, 32))
+	approverSig := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x89}, 64))
+	handoffNonce := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x8a}, 12))
+	encryptedHandoff := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x8b}, 96))
+	respondBody, _ := json.Marshal(map[string]any{
+		"node_auth_proto_b64":       clientAuthAB64,
+		"pairing_id":                pairingID,
+		"approved":                  true,
+		"approver_eph_x25519_pub_b64": approverEph,
+		"approver_signature_b64":    approverSig,
+		"handoff_nonce_b64":         handoffNonce,
+		"encrypted_handoff_b64":     encryptedHandoff,
+	})
+	respA, err := http.Post(env.ts.URL+"/api/v1/pairing/respond", "application/json", bytes.NewReader(respondBody))
+	if err != nil {
+		t.Fatalf("pairing respond: %v", err)
+	}
+	_ = respA.Body.Close()
+	if respA.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on pairing respond, got %d", respA.StatusCode)
+	}
+
+	// 5. Workstation B poll receives paired handoff!
+	codeB2, pollOutB2 := env.pollEnrollment(stateB, pollB)
+	if codeB2 != http.StatusOK || pollOutB2["status"] != "paired" || pollOutB2["encrypted_handoff_b64"] != encryptedHandoff || pollOutB2["approver_node_id"] != "workstation-a" {
+		t.Fatalf("unexpected paired poll response: %d %+v", codeB2, pollOutB2)
+	}
+}
+
+func TestDevicePairingDenyCancelReplaceAndRelayReject(t *testing.T) {
+	env := newTestEnv(t)
+
+	// Enroll Workstation A.
+	keyAPub, keyAPriv, _ := ed25519.GenerateKey(rand.Reader)
+	keyAToken := "sc_pub_" + hex.EncodeToString(keyAPub)
+	stateA, pollA, authURLA := env.startEnrollment(keyAToken)
+	rA, _ := http.Get(authURLA)
+	_ = rA.Body.Close()
+	_, _ = env.pollEnrollment(stateA, pollA)
+
+	clientAuthA := buildSignedNodeAuthWithRole(t, keyAPub, keyAPriv, nil, sshcastv1.NodeRole_NODE_ROLE_CLIENT, "workstation-a")
+	rawClientAuthA, _ := proto.Marshal(clientAuthA)
+	clientAuthAB64 := base64.StdEncoding.EncodeToString(rawClientAuthA)
+
+	relayAuth := buildSignedNodeAuthWithRole(t, keyAPub, keyAPriv, nil, sshcastv1.NodeRole_NODE_ROLE_RELAY, "relay-1")
+	rawRelayAuth, _ := proto.Marshal(relayAuth)
+	relayAuthB64 := base64.StdEncoding.EncodeToString(rawRelayAuth)
+
+	// Relay-role NodeAuth must be rejected on /api/v1/pairing/poll and /respond.
+	relayPollResp, _ := http.Post(env.ts.URL+"/api/v1/pairing/poll", "application/json", bytes.NewReader([]byte(`{"node_auth_proto_b64":"`+relayAuthB64+`","timeout_secs":0}`)))
+	_ = relayPollResp.Body.Close()
+	if relayPollResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for relay pairing poll, got %d", relayPollResp.StatusCode)
+	}
+	relayRespResp, _ := http.Post(env.ts.URL+"/api/v1/pairing/respond", "application/json", bytes.NewReader([]byte(`{"node_auth_proto_b64":"`+relayAuthB64+`","pairing_id":"x","approved":false}`)))
+	_ = relayRespResp.Body.Close()
+	if relayRespResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for relay pairing respond, got %d", relayRespResp.StatusCode)
+	}
+
+	// Upload a vault so we verify explicit replace deletes the stale vault.
+	upsertPayload, _ := json.Marshal(map[string]any{
+		"node_auth_proto_b64": clientAuthAB64,
+		"vault": map[string]any{
+			"version":        1,
+			"kdf_alg":        "scrypt",
+			"kdf_params":     map[string]any{"log_n": 15, "r": 8, "p": 1},
+			"salt_b64":       base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x11}, 16)),
+			"nonce_b64":      base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x12}, 12)),
+			"ciphertext_b64": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x13}, 48)),
+		},
+	})
+	upResp, _ := http.Post(env.ts.URL+"/api/v1/recovery-vault", "application/json", bytes.NewReader(upsertPayload))
+	_ = upResp.Body.Close()
+
+	// 1. Deny flow.
+	keyBPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	nodeBPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	stateB, pollB, authURLB := env.startPairingEnrollment("sc_pub_"+hex.EncodeToString(keyBPub), "win-b", "windows", nodeBPub, bytes.Repeat([]byte{0x55}, 32))
+	rB, _ := http.Get(authURLB)
+	_ = rB.Body.Close()
+	_, outB := env.pollEnrollment(stateB, pollB)
+	pairingIDB := outB["pairing_id"].(string)
+
+	denyBody, _ := json.Marshal(map[string]any{
+		"node_auth_proto_b64": clientAuthAB64,
+		"pairing_id":          pairingIDB,
+		"approved":            false,
+	})
+	denyResp, _ := http.Post(env.ts.URL+"/api/v1/pairing/respond", "application/json", bytes.NewReader(denyBody))
+	_ = denyResp.Body.Close()
+	if denyResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on deny, got %d", denyResp.StatusCode)
+	}
+	codeBDeny, outBDeny := env.pollEnrollment(stateB, pollB)
+	if codeBDeny != http.StatusForbidden || outBDeny["status"] != "denied" {
+		t.Fatalf("expected 403 denied, got %d %+v", codeBDeny, outBDeny)
+	}
+
+	// 2. Cancel flow.
+	keyCPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	nodeCPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	stateC, pollC, authURLC := env.startPairingEnrollment("sc_pub_"+hex.EncodeToString(keyCPub), "linux-c", "linux", nodeCPub, bytes.Repeat([]byte{0x66}, 32))
+	rC, _ := http.Get(authURLC)
+	_ = rC.Body.Close()
+	cancelReq, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/api/v1/enroll/cancel", bytes.NewReader([]byte(`{"state":"`+stateC+`"}`)))
+	cancelReq.Header.Set("Authorization", "Bearer "+pollC)
+	cancelReq.Header.Set("Content-Type", "application/json")
+	cancelResp, _ := http.DefaultClient.Do(cancelReq)
+	_ = cancelResp.Body.Close()
+	if cancelResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on cancel, got %d", cancelResp.StatusCode)
+	}
+	codeCCancel, outCCancel := env.pollEnrollment(stateC, pollC)
+	if codeCCancel != http.StatusConflict || outCCancel["status"] != "canceled" {
+		t.Fatalf("expected 409 canceled, got %d %+v", codeCCancel, outCCancel)
+	}
+
+	// 3. Explicit key replacement flow + stale vault cleanup.
+	keyDPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyDToken := "sc_pub_" + hex.EncodeToString(keyDPub)
+	nodeDPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	stateD, pollD, authURLD := env.startPairingEnrollment(keyDToken, "linux-d", "linux", nodeDPub, bytes.Repeat([]byte{0x77}, 32))
+	rD, _ := http.Get(authURLD)
+	_ = rD.Body.Close()
+
+	repReq, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/api/v1/enroll/replace", bytes.NewReader([]byte(`{"state":"`+stateD+`"}`)))
+	repReq.Header.Set("Authorization", "Bearer "+pollD)
+	repReq.Header.Set("Content-Type", "application/json")
+	repResp, _ := http.DefaultClient.Do(repReq)
+	var repOut map[string]any
+	_ = json.NewDecoder(repResp.Body).Decode(&repOut)
+	_ = repResp.Body.Close()
+	if repResp.StatusCode != http.StatusOK || repOut["status"] != "approved" {
+		t.Fatalf("expected 200 approved on replace, got %d %+v", repResp.StatusCode, repOut)
+	}
+	certTok, _ := repOut["cert_token"].(string)
+	cert, err := auth.DecodeUserCertToken(certTok)
+	if err != nil {
+		t.Fatalf("DecodeUserCertToken after replace: %v", err)
+	}
+	if err := auth.VerifyUserCert(cert, keyDPub, uint64(time.Now().Unix())); err != nil {
+		t.Fatalf("VerifyUserCert after replace: %v", err)
+	}
+
+	// Confirm user pubkey is now keyD and old recovery vault was deleted.
+	dbUser, err := env.queries.GetUserByPubkey(t.Context(), keyDToken)
+	if err != nil {
+		t.Fatalf("expected keyD registered: %v", err)
+	}
+	if _, err := env.queries.GetRecoveryVaultByUserID(t.Context(), dbUser.ID); err == nil {
+		t.Fatalf("expected old recovery vault deleted after key replacement")
+	}
+
+	// Banned user cannot call /api/v1/enroll/replace.
+	admin := env.adminClient()
+	banResp, _ := admin.PostForm(env.ts.URL+"/console/users/status", url.Values{
+		"id":     {strconv.FormatInt(dbUser.ID, 10)},
+		"status": {"banned"},
+	})
+	_ = banResp.Body.Close()
+	keyEPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	nodeEPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	stateE, pollE, authURLE := env.startPairingEnrollment("sc_pub_"+hex.EncodeToString(keyEPub), "linux-e", "linux", nodeEPub, bytes.Repeat([]byte{0x99}, 32))
+	rE, _ := http.Get(authURLE)
+	_ = rE.Body.Close()
+	if rE.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for banned user OAuth callback, got %d", rE.StatusCode)
+	}
+	repBannedReq, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/api/v1/enroll/replace", bytes.NewReader([]byte(`{"state":"`+stateE+`"}`)))
+	repBannedReq.Header.Set("Authorization", "Bearer "+pollE)
+	repBannedReq.Header.Set("Content-Type", "application/json")
+	repBannedResp, _ := http.DefaultClient.Do(repBannedReq)
+	_ = repBannedResp.Body.Close()
+	if repBannedResp.StatusCode == http.StatusOK {
+		t.Fatalf("banned user must not succeed on /api/v1/enroll/replace")
+	}
+}

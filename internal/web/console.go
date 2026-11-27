@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -18,6 +17,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"stingr.net/go/sshcast-operator/internal/config"
@@ -49,6 +49,9 @@ type ConsoleServer struct {
 	GitHubOAuthBaseURL string
 	GitHubAPIBaseURL   string
 	HTTPClient         *http.Client
+
+	pairingMu      sync.Mutex
+	pairingWaiters map[string]map[chan struct{}]struct{}
 }
 
 type SignedCertResult struct {
@@ -120,6 +123,7 @@ func NewConsoleServer(cfg *config.Config, queries *db.Queries) *ConsoleServer {
 		GitHubOAuthBaseURL: defaultGitHubOAuthBaseURL,
 		GitHubAPIBaseURL:   defaultGitHubAPIBaseURL,
 		HTTPClient:         &http.Client{Timeout: 15 * time.Second},
+		pairingWaiters:     make(map[string]map[chan struct{}]struct{}),
 	}
 
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -149,6 +153,14 @@ func NewConsoleServer(cfg *config.Config, queries *db.Queries) *ConsoleServer {
 		s.mux.HandleFunc("OPTIONS "+prefix+"/api/v1/enroll/start", s.handleEnrollOptions)
 		s.mux.HandleFunc("GET "+prefix+"/api/v1/enroll/poll", s.handleEnrollPoll)
 		s.mux.HandleFunc("OPTIONS "+prefix+"/api/v1/enroll/poll", s.handleEnrollOptions)
+		s.mux.HandleFunc("POST "+prefix+"/api/v1/enroll/cancel", s.handleEnrollCancel)
+		s.mux.HandleFunc("OPTIONS "+prefix+"/api/v1/enroll/cancel", s.handleEnrollOptions)
+		s.mux.HandleFunc("POST "+prefix+"/api/v1/enroll/replace", s.handleEnrollReplace)
+		s.mux.HandleFunc("OPTIONS "+prefix+"/api/v1/enroll/replace", s.handleEnrollOptions)
+		s.mux.HandleFunc("POST "+prefix+"/api/v1/pairing/poll", s.handlePairingPoll)
+		s.mux.HandleFunc("OPTIONS "+prefix+"/api/v1/pairing/poll", s.handleRenewOptions)
+		s.mux.HandleFunc("POST "+prefix+"/api/v1/pairing/respond", s.handlePairingRespond)
+		s.mux.HandleFunc("OPTIONS "+prefix+"/api/v1/pairing/respond", s.handleRenewOptions)
 		s.mux.HandleFunc("GET "+prefix+"/auth/github/start", s.handleGitHubStart)
 		s.mux.HandleFunc("GET "+prefix+"/auth/github/callback", s.handleGitHubCallback)
 	}
@@ -721,7 +733,12 @@ func (s *ConsoleServer) handleEnrollStart(w http.ResponseWriter, r *http.Request
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var body struct {
-		UserPubkey string `json:"user_pubkey"`
+		UserPubkey      string `json:"user_pubkey"`
+		SupportsPairing bool   `json:"supports_pairing"`
+		NodeName        string `json:"node_name"`
+		OsName          string `json:"os_name"`
+		NodePubkeyB64   string `json:"node_pubkey_b64"`
+		EphX25519PubB64 string `json:"eph_x25519_pub_b64"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
@@ -739,6 +756,39 @@ func (s *ConsoleServer) handleEnrollStart(w http.ResponseWriter, r *http.Request
 		return
 	}
 	canonicalPub := "sc_pub_" + hex.EncodeToString(userPub)
+
+	var nodeNameClean, osNameClean, nodePubCanon, ephPubCanon string
+	if body.SupportsPairing {
+		nodePubBytes, err := decodeBase64Flexible(body.NodePubkeyB64)
+		if err != nil || len(nodePubBytes) != 32 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"ok":    false,
+				"error": "invalid node_pubkey_b64 (expected 32 bytes)",
+			})
+			return
+		}
+		ephPubBytes, err := decodeBase64Flexible(body.EphX25519PubB64)
+		if err != nil || len(ephPubBytes) != 32 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"ok":    false,
+				"error": "invalid eph_x25519_pub_b64 (expected 32 bytes)",
+			})
+			return
+		}
+		nodeNameClean = strings.TrimSpace(body.NodeName)
+		if nodeNameClean == "" {
+			nodeNameClean = "workstation"
+		}
+		if len(nodeNameClean) > 128 {
+			nodeNameClean = nodeNameClean[:128]
+		}
+		osNameClean = strings.TrimSpace(body.OsName)
+		if len(osNameClean) > 64 {
+			osNameClean = osNameClean[:64]
+		}
+		nodePubCanon = base64.StdEncoding.EncodeToString(nodePubBytes)
+		ephPubCanon = base64.StdEncoding.EncodeToString(ephPubBytes)
+	}
 
 	state, err := randomHexToken(32)
 	if err != nil {
@@ -775,6 +825,35 @@ func (s *ConsoleServer) handleEnrollStart(w http.ResponseWriter, r *http.Request
 		return
 	}
 	_ = s.queries.DeleteExpiredOAuthSessions(r.Context(), now.Unix())
+
+	if body.SupportsPairing {
+		pairingID, err := randomHexToken(16)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"ok":    false,
+				"error": "failed to generate pairing id",
+			})
+			return
+		}
+		if _, err := s.queries.CreatePairingRequest(r.Context(), db.CreatePairingRequestParams{
+			ID:              pairingID,
+			OauthState:      state,
+			NodeName:        nodeNameClean,
+			OsName:          osNameClean,
+			NodePubkeyB64:   nodePubCanon,
+			EphX25519PubB64: ephPubCanon,
+			Status:          "pending_oauth",
+			ExpiresAt:       now.Add(oauthSessionTTL).Unix(),
+			CreatedAt:       now.Unix(),
+		}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"ok":    false,
+				"error": "failed to create pairing request",
+			})
+			return
+		}
+		_ = s.queries.DeleteExpiredPairingRequests(r.Context(), now.Unix())
+	}
 
 	authURL := s.externalBaseURL(r) + "/auth/github/start?state=" + url.QueryEscape(state)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -1016,6 +1095,13 @@ func (s *ConsoleServer) handleGitHubCallback(w http.ResponseWriter, r *http.Requ
 				Message: "Your key has been approved. You may close this tab and return to your terminal.",
 				IsOK:    true,
 			})
+		case "pairing_required":
+			s.renderOAuthPage(w, http.StatusOK, oauthPageData{
+				Title:   "Confirm New Workstation",
+				Heading: "Confirm New Workstation",
+				Message: "Return to Sshcast to approve this workstation on an existing device or enter your recovery passphrase.",
+				IsOK:    true,
+			})
 		case "awaiting_approval":
 			s.renderOAuthPage(w, http.StatusOK, oauthPageData{
 				Title:   "Awaiting Approval",
@@ -1084,6 +1170,50 @@ func (s *ConsoleServer) handleGitHubCallback(w http.ResponseWriter, r *http.Requ
 		if existingUser.Status == "banned" {
 			s.failOAuthSession(ctx, w, state, "banned", "Account Banned", "Your GitHub account is banned from this operator.", http.StatusForbidden)
 			return
+		}
+
+		if existingUser.UserPubkey != sess.UserPubkey {
+			if _, pairErr := s.queries.GetPairingRequestByState(ctx, state); pairErr == nil {
+				if existingUser.Status != "active" {
+					_, _ = s.queries.UpdateOAuthSession(ctx, db.UpdateOAuthSessionParams{
+						Status:    "awaiting_approval",
+						CertToken: "",
+						ErrorMsg:  "",
+						State:     state,
+					})
+					s.renderOAuthPage(w, http.StatusOK, oauthPageData{
+						Title:   "Awaiting Approval",
+						Heading: "Awaiting Administrator Approval",
+						Message: fmt.Sprintf("Authenticated as @%s. Your account is pending administrator approval before another workstation can be paired.", ghUser.Login),
+					})
+					return
+				}
+
+				if _, err := s.queries.BindPairingRequestToUser(ctx, db.BindPairingRequestToUserParams{
+					UserID:           sql.NullInt64{Int64: existingUser.ID, Valid: true},
+					TargetUserPubkey: existingUser.UserPubkey,
+					GithubLogin:      ghUser.Login,
+					ExpiresAt:        now.Add(pairingRequestTTL).Unix(),
+					OauthState:       state,
+				}); err != nil {
+					s.failOAuthSession(ctx, w, state, "error", "Pairing Error", "Failed to initialize device pairing request.", http.StatusInternalServerError)
+					return
+				}
+				_, _ = s.queries.UpdateOAuthSession(ctx, db.UpdateOAuthSessionParams{
+					Status:    "pairing_required",
+					CertToken: "",
+					ErrorMsg:  "",
+					State:     state,
+				})
+				s.notifyPairingWaiters(existingUser.UserPubkey)
+				s.renderOAuthPage(w, http.StatusOK, oauthPageData{
+					Title:   "Confirm New Workstation",
+					Heading: "Confirm New Workstation",
+					Message: fmt.Sprintf("Signed in as @%s. Return to Sshcast to approve this workstation on an existing device or enter your recovery passphrase.", ghUser.Login),
+					IsOK:    true,
+				})
+				return
+			}
 		}
 
 		updatedUser, err := s.queries.UpdateUserPubkeyAndLogin(ctx, db.UpdateUserPubkeyAndLoginParams{
@@ -1226,68 +1356,12 @@ func extractBearerToken(r *http.Request) string {
 
 func (s *ConsoleServer) handleEnrollPoll(w http.ResponseWriter, r *http.Request) {
 	setCORSHeaders(w, "GET, POST, OPTIONS")
-	if s.queries == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"ok":    false,
-			"error": "database not initialized",
-		})
+	sess, now, ok := s.authenticateOAuthPollSession(w, r, r.URL.Query().Get("state"))
+	if !ok {
 		return
 	}
-
-	state := strings.TrimSpace(r.URL.Query().Get("state"))
-	if state == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"ok":    false,
-			"error": "missing state",
-		})
-		return
-	}
-	pollToken := extractBearerToken(r)
-	if pollToken == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{
-			"ok":    false,
-			"error": "missing bearer token",
-		})
-		return
-	}
-
 	ctx := r.Context()
-	sess, err := s.queries.GetOAuthSession(ctx, state)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]any{
-				"ok":     false,
-				"status": "not_found",
-				"error":  "enrollment session not found",
-			})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"ok":    false,
-			"error": "failed to query enrollment session",
-		})
-		return
-	}
-
-	gotHash := sha256Hex(pollToken)
-	if subtle.ConstantTimeCompare([]byte(gotHash), []byte(sess.PollTokenHash)) != 1 {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{
-			"ok":    false,
-			"error": "invalid poll token",
-		})
-		return
-	}
-
-	now := time.Now().UTC()
-	if now.Unix() > sess.ExpiresAt {
-		_ = s.queries.DeleteExpiredOAuthSessions(ctx, now.Unix())
-		writeJSON(w, http.StatusGone, map[string]any{
-			"ok":     false,
-			"status": "expired",
-			"error":  "enrollment session expired",
-		})
-		return
-	}
+	state := sess.State
 
 	switch sess.Status {
 	case "approved":
@@ -1295,6 +1369,96 @@ func (s *ConsoleServer) handleEnrollPoll(w http.ResponseWriter, r *http.Request)
 			"ok":         true,
 			"status":     "approved",
 			"cert_token": sess.CertToken,
+		})
+	case "pairing_required":
+		pr, err := s.queries.GetPairingRequestByState(ctx, state)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeJSON(w, http.StatusNotFound, map[string]any{
+					"ok":     false,
+					"status": "not_found",
+					"error":  "pairing request not found",
+				})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"ok":    false,
+				"error": "failed to query pairing request",
+			})
+			return
+		}
+		switch pr.Status {
+		case "awaiting_peer":
+			if now.Unix() > pr.ExpiresAt {
+				writeJSON(w, http.StatusGone, map[string]any{
+					"ok":     false,
+					"status": "expired",
+					"error":  "pairing request expired",
+				})
+				return
+			}
+			hasVault := false
+			var vaultPayload *recoveryVaultJSON
+			if pr.UserID.Valid {
+				if vault, vErr := s.queries.GetRecoveryVaultByUserID(ctx, pr.UserID.Int64); vErr == nil {
+					hasVault = true
+					vp := recoveryVaultToJSON(vault)
+					vaultPayload = &vp
+				}
+			}
+			resp := map[string]any{
+				"ok":                   true,
+				"status":               "pairing_required",
+				"pairing_id":           pr.ID,
+				"existing_user_pubkey": pr.TargetUserPubkey,
+				"github_login":         pr.GithubLogin,
+				"has_recovery_vault":   hasVault,
+			}
+			if vaultPayload != nil {
+				resp["recovery_vault"] = vaultPayload
+			}
+			writeJSON(w, http.StatusOK, resp)
+		case "approved":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":                        true,
+				"status":                    "paired",
+				"pairing_id":                pr.ID,
+				"existing_user_pubkey":      pr.TargetUserPubkey,
+				"approver_node_id":          pr.ApproverNodeID,
+				"approver_eph_x25519_pub_b64": pr.ApproverEphX25519PubB64,
+				"approver_signature_b64":    pr.ApproverSignatureB64,
+				"handoff_nonce_b64":         pr.HandoffNonceB64,
+				"encrypted_handoff_b64":     pr.EncryptedHandoffB64,
+			})
+		case "denied":
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"ok":     false,
+				"status": "denied",
+				"error":  "pairing request was denied on your existing workstation",
+			})
+		case "canceled":
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"ok":     false,
+				"status": "canceled",
+				"error":  "pairing request was canceled",
+			})
+		case "replaced_key":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":         true,
+				"status":     "approved",
+				"cert_token": sess.CertToken,
+			})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"ok":    false,
+				"error": fmt.Sprintf("unexpected pairing status %q", pr.Status),
+			})
+		}
+	case "canceled":
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"ok":     false,
+			"status": "canceled",
+			"error":  "enrollment canceled",
 		})
 	case "awaiting_approval":
 		user, err := s.queries.GetUserByPubkey(ctx, sess.UserPubkey)
