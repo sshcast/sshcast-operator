@@ -1,7 +1,7 @@
 %global debug_package %{nil}
 
 Name:           sshcast-operator
-Version:        0.1.0
+Version:        0.1.1
 Release:        1%{?dist}
 Summary:        Operator Console & User Key Signing Authority for Sshcast Swarm
 License:        MIT OR Apache-2.0
@@ -71,5 +71,8 @@ install -D -m 0600 systemd/sshcast-operator.sysconfig %{buildroot}%{_sysconfdir}
 %attr(0600,root,root) %config(noreplace) %{_sysconfdir}/sysconfig/sshcast-operator
 
 %changelog
+* Fri Nov 27 2026 Paul Komkoff <i@stingr.net> - 0.1.1-1
+- Add zero-trust device pairing, explicit key reset, and recovery vault API endpoints
+
 * Tue Nov 10 2026 Paul Komkoff <i@stingr.net> - 0.1.0-1
 - Initial Fedora RPM package for sshcast-operator
