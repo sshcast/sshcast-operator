@@ -896,7 +896,7 @@ func (s *ConsoleServer) handleGitHubStart(w http.ResponseWriter, r *http.Request
 		s.renderOAuthPage(w, http.StatusNotFound, oauthPageData{
 			Title:   "Unknown Session",
 			Heading: "Invalid Enrollment Session",
-			Message: "The enrollment session was not found. Please start again from your CLI.",
+			Message: "The enrollment session was not found. Please start again from Sshcast.",
 			IsError: true,
 		})
 		return
@@ -905,7 +905,7 @@ func (s *ConsoleServer) handleGitHubStart(w http.ResponseWriter, r *http.Request
 		s.renderOAuthPage(w, http.StatusGone, oauthPageData{
 			Title:   "Session Expired",
 			Heading: "Enrollment Session Expired",
-			Message: "This enrollment link has expired. Please start again from your CLI.",
+			Message: "This enrollment link has expired. Please start again from Sshcast.",
 			IsError: true,
 		})
 		return
@@ -1069,7 +1069,7 @@ func (s *ConsoleServer) handleGitHubCallback(w http.ResponseWriter, r *http.Requ
 		s.renderOAuthPage(w, http.StatusNotFound, oauthPageData{
 			Title:   "Unknown Session",
 			Heading: "Invalid Enrollment Session",
-			Message: "The enrollment session was not found. Please restart enrollment from your CLI.",
+			Message: "The enrollment session was not found. Please restart enrollment from Sshcast.",
 			IsError: true,
 		})
 		return
@@ -1080,7 +1080,7 @@ func (s *ConsoleServer) handleGitHubCallback(w http.ResponseWriter, r *http.Requ
 		s.renderOAuthPage(w, http.StatusGone, oauthPageData{
 			Title:   "Session Expired",
 			Heading: "Enrollment Session Expired",
-			Message: "This enrollment session has expired. Please restart enrollment from your CLI.",
+			Message: "This enrollment session has expired. Please restart enrollment from Sshcast.",
 			IsError: true,
 		})
 		return
@@ -1092,7 +1092,7 @@ func (s *ConsoleServer) handleGitHubCallback(w http.ResponseWriter, r *http.Requ
 			s.renderOAuthPage(w, http.StatusOK, oauthPageData{
 				Title:   "Enrollment Approved",
 				Heading: "Enrollment Approved",
-				Message: "Your key has been approved. You may close this tab and return to your terminal.",
+				Message: "Your key has been approved. You may close this tab and return to Sshcast.",
 				IsOK:    true,
 			})
 		case "pairing_required":
@@ -1106,7 +1106,7 @@ func (s *ConsoleServer) handleGitHubCallback(w http.ResponseWriter, r *http.Requ
 			s.renderOAuthPage(w, http.StatusOK, oauthPageData{
 				Title:   "Awaiting Approval",
 				Heading: "Awaiting Administrator Approval",
-				Message: "Your enrollment is pending administrator approval. Keep your CLI running to receive your certificate automatically.",
+				Message: "Your enrollment is pending administrator approval. Keep Sshcast open to receive your certificate automatically.",
 			})
 		case "banned":
 			s.renderOAuthPage(w, http.StatusForbidden, oauthPageData{
@@ -1242,7 +1242,7 @@ func (s *ConsoleServer) handleGitHubCallback(w http.ResponseWriter, r *http.Requ
 			s.renderOAuthPage(w, http.StatusOK, oauthPageData{
 				Title:   "Enrollment Approved",
 				Heading: "Enrollment Approved",
-				Message: fmt.Sprintf("Authenticated as @%s. Your SSHcast certificate has been issued; you may close this window and return to your terminal.", ghUser.Login),
+				Message: fmt.Sprintf("Authenticated as @%s. Your SSHcast certificate has been issued; you may close this window and return to Sshcast.", ghUser.Login),
 				IsOK:    true,
 			})
 			return
@@ -1257,7 +1257,7 @@ func (s *ConsoleServer) handleGitHubCallback(w http.ResponseWriter, r *http.Requ
 		s.renderOAuthPage(w, http.StatusOK, oauthPageData{
 			Title:   "Awaiting Approval",
 			Heading: "Awaiting Administrator Approval",
-			Message: fmt.Sprintf("Authenticated as @%s. Your account is pending administrator approval; keep your CLI running to receive your certificate automatically.", ghUser.Login),
+			Message: fmt.Sprintf("Authenticated as @%s. Your account is pending administrator approval; keep Sshcast open to receive your certificate automatically.", ghUser.Login),
 		})
 		return
 	}
@@ -1327,7 +1327,7 @@ func (s *ConsoleServer) handleGitHubCallback(w http.ResponseWriter, r *http.Requ
 		s.renderOAuthPage(w, http.StatusOK, oauthPageData{
 			Title:   "Enrollment Approved",
 			Heading: "Enrollment Approved",
-			Message: fmt.Sprintf("Welcome @%s! Your SSHcast certificate has been issued; you may close this window and return to your terminal.", ghUser.Login),
+			Message: fmt.Sprintf("Welcome @%s! Your SSHcast certificate has been issued; you may close this window and return to Sshcast.", ghUser.Login),
 			IsOK:    true,
 		})
 		return
@@ -1342,7 +1342,7 @@ func (s *ConsoleServer) handleGitHubCallback(w http.ResponseWriter, r *http.Requ
 	s.renderOAuthPage(w, http.StatusOK, oauthPageData{
 		Title:   "Awaiting Approval",
 		Heading: "Awaiting Administrator Approval",
-		Message: fmt.Sprintf("Authenticated as @%s. Your enrollment requires administrator approval; keep your CLI running to receive your certificate automatically.", ghUser.Login),
+		Message: fmt.Sprintf("Authenticated as @%s. Your enrollment requires administrator approval; keep Sshcast open to receive your certificate automatically.", ghUser.Login),
 	})
 }
 
@@ -1716,13 +1716,35 @@ const oauthHTML = `<!DOCTYPE html>
       font-size: 14px;
       line-height: 1.55;
     }
+    .close-btn {
+      margin-top: 16px;
+      padding: 8px 14px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: #1f2a44;
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .close-btn:hover { background: #2b395c; }
   </style>
 </head>
 <body>
   <div class="card">
     <h1>{{.Heading}}</h1>
     <p>{{.Message}}</p>
+    <button id="close-window-btn" class="close-btn" type="button" hidden>Close Window</button>
   </div>
+  <script>
+    (() => {
+      const btn = document.getElementById("close-window-btn");
+      if (btn && window.opener) {
+        btn.hidden = false;
+        btn.addEventListener("click", () => window.close());
+      }
+    })();
+  </script>
 </body>
 </html>
 `

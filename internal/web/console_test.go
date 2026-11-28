@@ -415,7 +415,7 @@ func TestGitHubOAuthAutoApproveMatureUser(t *testing.T) {
 	}
 	oauthHTMLBytes, _ := io.ReadAll(oauthResp.Body)
 	_ = oauthResp.Body.Close()
-	if oauthResp.StatusCode != http.StatusOK || !strings.Contains(string(oauthHTMLBytes), "Enrollment Approved") {
+	if oauthResp.StatusCode != http.StatusOK || !strings.Contains(string(oauthHTMLBytes), "Enrollment Approved") || !strings.Contains(string(oauthHTMLBytes), "return to Sshcast") || !strings.Contains(string(oauthHTMLBytes), "close-window-btn") {
 		t.Fatalf("expected approved HTML page, status=%d body=%s", oauthResp.StatusCode, oauthHTMLBytes)
 	}
 
